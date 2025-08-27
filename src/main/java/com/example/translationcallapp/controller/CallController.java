@@ -46,20 +46,41 @@ public class CallController {
     
     @PostMapping("/start-call")
     public ResponseEntity<Map<String, Object>> startCall(
-            @RequestParam String phoneNumber,
+            @RequestParam(required = false) String phoneNumber,
+            @RequestParam(required = false) String to,
+            @RequestParam(required = false) String phone,
             @RequestParam(required = false, defaultValue = "en-US") String sourceLanguage,
-            @RequestParam(required = false, defaultValue = "es-ES") String targetLanguage) {
+            @RequestParam(required = false) String fromLanguage,
+            @RequestParam(required = false, defaultValue = "es-ES") String targetLanguage,
+            @RequestParam(required = false) String toLanguage) {
         
         Map<String, Object> response = new HashMap<>();
         
         try {
-            if (phoneNumber == null || phoneNumber.trim().isEmpty()) {
+            // Try to get the phone number from any possible parameter name
+            String targetNumber = phoneNumber;
+            if (targetNumber == null || targetNumber.isEmpty()) {
+                targetNumber = to;
+            }
+            if (targetNumber == null || targetNumber.isEmpty()) {
+                targetNumber = phone;
+            }
+            
+            // Use fromLanguage/toLanguage if provided, otherwise use sourceLanguage/targetLanguage
+            String sourceLang = (fromLanguage != null && !fromLanguage.isEmpty()) ? fromLanguage : sourceLanguage;
+            String targetLang = (toLanguage != null && !toLanguage.isEmpty()) ? toLanguage : targetLanguage;
+            
+            // Convert short language codes to full codes
+            sourceLang = convertLanguageCode(sourceLang);
+            targetLang = convertLanguageCode(targetLang);
+            
+            if (targetNumber == null || targetNumber.trim().isEmpty()) {
                 response.put("status", "error");
                 response.put("message", "Phone number is required");
                 return ResponseEntity.badRequest().body(response);
             }
             
-            if (!isValidPhoneNumber(phoneNumber)) {
+            if (!isValidPhoneNumber(targetNumber)) {
                 response.put("status", "error");
                 response.put("message", "Invalid phone number format");
                 return ResponseEntity.badRequest().body(response);
@@ -74,11 +95,11 @@ public class CallController {
             initTwilio();
             
             // Create TwiML URL with parameters for translation
-            String twimlUrl = baseUrl + "/api/voice?to=" + phoneNumber + 
-                             "&source=" + sourceLanguage + "&target=" + targetLanguage;
+            String twimlUrl = baseUrl + "/api/voice?to=" + targetNumber + 
+                             "&source=" + sourceLang + "&target=" + targetLang;
             
             Call call = Call.creator(
-                new PhoneNumber(phoneNumber),
+                new PhoneNumber(targetNumber),
                 new PhoneNumber(twilioPhoneNumber),
                 URI.create(twimlUrl)
             ).create();
@@ -86,10 +107,10 @@ public class CallController {
             response.put("status", "success");
             response.put("message", "Translation call initiated successfully");
             response.put("callSid", call.getSid());
-            response.put("to", phoneNumber);
+            response.put("to", targetNumber);
             response.put("from", twilioPhoneNumber);
-            response.put("sourceLanguage", sourceLanguage);
-            response.put("targetLanguage", targetLanguage);
+            response.put("sourceLanguage", sourceLang);
+            response.put("targetLanguage", targetLang);
             
             return ResponseEntity.ok(response);
             
@@ -201,6 +222,26 @@ public class CallController {
             response.put("status", "error");
             response.put("message", "Failed to end call: " + e.getMessage());
             return ResponseEntity.status(HttpStatus.INTERNAL_SERVER_ERROR).body(response);
+        }
+    }
+    
+    private String convertLanguageCode(String languageCode) {
+        if (languageCode == null) return "en-US";
+        
+        switch (languageCode.toLowerCase()) {
+            case "en": return "en-US";
+            case "es": return "es-ES";
+            case "fr": return "fr-FR";
+            case "de": return "de-DE";
+            case "it": return "it-IT";
+            case "pt": return "pt-BR";
+            case "ja": return "ja-JP";
+            case "ko": return "ko-KR";
+            case "zh": return "zh-CN";
+            case "ar": return "ar-SA";
+            case "ru": return "ru-RU";
+            case "hi": return "hi-IN";
+            default: return languageCode; // Return as-is if already full code
         }
     }
     
