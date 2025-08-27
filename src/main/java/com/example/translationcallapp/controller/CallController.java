@@ -45,14 +45,21 @@ public class CallController {
     }
     
     @PostMapping("/start-call")
-    public ResponseEntity<Map<String, Object>> startCall(
-            @RequestParam String to,
-            @RequestParam(required = false, defaultValue = "en-US") String sourceLanguage,
-            @RequestParam(required = false, defaultValue = "es-ES") String targetLanguage) {
+    public ResponseEntity<Map<String, Object>> startCall(@RequestBody Map<String, String> request) {
         
         Map<String, Object> response = new HashMap<>();
         
         try {
+            String to = request.get("to");
+            String sourceLanguage = request.getOrDefault("sourceLanguage", "en-US");
+            String targetLanguage = request.getOrDefault("targetLanguage", "es-ES");
+            
+            if (to == null || to.trim().isEmpty()) {
+                response.put("status", "error");
+                response.put("message", "Phone number is required");
+                return ResponseEntity.badRequest().body(response);
+            }
+            
             if (!isValidPhoneNumber(to)) {
                 response.put("status", "error");
                 response.put("message", "Invalid phone number format");
@@ -169,6 +176,35 @@ public class CallController {
         }
     }
     
+    @PostMapping("/end-call/{callSid}")
+    public ResponseEntity<Map<String, String>> endCall(@PathVariable String callSid) {
+        Map<String, String> response = new HashMap<>();
+        
+        try {
+            if (accountSid.isEmpty() || authToken.isEmpty()) {
+                response.put("status", "error");
+                response.put("message", "Twilio credentials not configured");
+                return ResponseEntity.status(HttpStatus.SERVICE_UNAVAILABLE).body(response);
+            }
+            
+            initTwilio();
+            Call call = Call.updater(callSid)
+                .setStatus(Call.UpdateStatus.COMPLETED)
+                .update();
+            
+            response.put("status", "success");
+            response.put("message", "Call ended successfully");
+            response.put("callSid", call.getSid());
+            
+            return ResponseEntity.ok(response);
+            
+        } catch (Exception e) {
+            response.put("status", "error");
+            response.put("message", "Failed to end call: " + e.getMessage());
+            return ResponseEntity.status(HttpStatus.INTERNAL_SERVER_ERROR).body(response);
+        }
+    }
+    
     private String getLanguageName(String languageCode) {
         switch (languageCode) {
             case "en-US": return "English";
@@ -177,6 +213,12 @@ public class CallController {
             case "de-DE": return "German";
             case "it-IT": return "Italian";
             case "pt-BR": return "Portuguese";
+            case "ja-JP": return "Japanese";
+            case "ko-KR": return "Korean";
+            case "zh-CN": return "Chinese";
+            case "ar-SA": return "Arabic";
+            case "ru-RU": return "Russian";
+            case "hi-IN": return "Hindi";
             default: return languageCode;
         }
     }
