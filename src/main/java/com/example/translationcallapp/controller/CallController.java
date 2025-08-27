@@ -9,9 +9,11 @@ import org.springframework.web.bind.annotation.*;
 import org.springframework.http.ResponseEntity;
 import org.springframework.http.HttpStatus;
 
+import javax.servlet.http.HttpServletRequest;
 import java.net.URI;
 import java.util.HashMap;
 import java.util.Map;
+import java.util.Arrays;
 
 @RestController
 @RequestMapping("/api")
@@ -45,34 +47,38 @@ public class CallController {
     }
     
     @PostMapping("/start-call")
-    public ResponseEntity<Map<String, Object>> startCall(
-            @RequestParam(required = false) String phoneNumber,
-            @RequestParam(required = false) String to,
-            @RequestParam(required = false) String phone,
-            @RequestParam(required = false, defaultValue = "en-US") String sourceLanguage,
-            @RequestParam(required = false) String fromLanguage,
-            @RequestParam(required = false, defaultValue = "es-ES") String targetLanguage,
-            @RequestParam(required = false) String toLanguage) {
+    public ResponseEntity<Map<String, Object>> startCall(HttpServletRequest request) {
         
         Map<String, Object> response = new HashMap<>();
         
         try {
-            // Try to get the phone number from any possible parameter name
-            String targetNumber = phoneNumber;
-            if (targetNumber == null || targetNumber.isEmpty()) {
-                targetNumber = to;
-            }
-            if (targetNumber == null || targetNumber.isEmpty()) {
-                targetNumber = phone;
-            }
+            // Log all parameters for debugging
+            System.out.println("=== START CALL REQUEST DEBUG ===");
+            request.getParameterMap().forEach((key, values) -> {
+                System.out.println("Parameter: " + key + " = " + Arrays.toString(values));
+            });
+            System.out.println("Content-Type: " + request.getContentType());
+            System.out.println("Method: " + request.getMethod());
+            System.out.println("=== END DEBUG ===");
             
-            // Use fromLanguage/toLanguage if provided, otherwise use sourceLanguage/targetLanguage
-            String sourceLang = (fromLanguage != null && !fromLanguage.isEmpty()) ? fromLanguage : sourceLanguage;
-            String targetLang = (toLanguage != null && !toLanguage.isEmpty()) ? toLanguage : targetLanguage;
+            // Extract parameters manually
+            String targetNumber = request.getParameter("phoneNumber");
+            if (targetNumber == null) targetNumber = request.getParameter("to");
+            if (targetNumber == null) targetNumber = request.getParameter("phone");
             
-            // Convert short language codes to full codes
+            String sourceLang = request.getParameter("fromLanguage");
+            if (sourceLang == null) sourceLang = request.getParameter("sourceLanguage");
+            if (sourceLang == null) sourceLang = "en";
+            
+            String targetLang = request.getParameter("toLanguage");
+            if (targetLang == null) targetLang = request.getParameter("targetLanguage");
+            if (targetLang == null) targetLang = "es";
+            
+            // Convert short codes to full codes
             sourceLang = convertLanguageCode(sourceLang);
             targetLang = convertLanguageCode(targetLang);
+            
+            System.out.println("Extracted - Phone: " + targetNumber + ", From: " + sourceLang + ", To: " + targetLang);
             
             if (targetNumber == null || targetNumber.trim().isEmpty()) {
                 response.put("status", "error");
@@ -98,11 +104,15 @@ public class CallController {
             String twimlUrl = baseUrl + "/api/voice?to=" + targetNumber + 
                              "&source=" + sourceLang + "&target=" + targetLang;
             
+            System.out.println("Creating call to: " + targetNumber + " from: " + twilioPhoneNumber);
+            
             Call call = Call.creator(
                 new PhoneNumber(targetNumber),
                 new PhoneNumber(twilioPhoneNumber),
                 URI.create(twimlUrl)
             ).create();
+            
+            System.out.println("Call created successfully: " + call.getSid());
             
             response.put("status", "success");
             response.put("message", "Translation call initiated successfully");
@@ -115,6 +125,8 @@ public class CallController {
             return ResponseEntity.ok(response);
             
         } catch (Exception e) {
+            System.out.println("Error in start-call: " + e.getMessage());
+            e.printStackTrace();
             response.put("status", "error");
             response.put("message", "Failed to initiate call: " + e.getMessage());
             return ResponseEntity.status(HttpStatus.INTERNAL_SERVER_ERROR).body(response);
@@ -128,6 +140,8 @@ public class CallController {
             @RequestParam(required = false, defaultValue = "es-ES") String target) {
         
         try {
+            System.out.println("Voice webhook called - To: " + to + ", Source: " + source + ", Target: " + target);
+            
             String streamUrl = baseUrl.replace("https://", "wss://") + "/stream?source=" + source + "&target=" + target;
             
             StringBuilder twiml = new StringBuilder();
@@ -159,9 +173,12 @@ public class CallController {
             
             twiml.append("</Response>");
             
+            System.out.println("Generated TwiML: " + twiml.toString());
+            
             return twiml.toString();
             
         } catch (Exception e) {
+            System.out.println("Error in voice webhook: " + e.getMessage());
             return "<?xml version=\"1.0\" encoding=\"UTF-8\"?><Response><Say voice=\"alice\">Sorry, there was an error setting up translation. Please try again.</Say></Response>";
         }
     }
