@@ -9,10 +9,6 @@ import org.springframework.web.bind.annotation.*;
 import org.springframework.http.ResponseEntity;
 import org.springframework.http.HttpStatus;
 
-import jakarta.servlet.http.HttpServletRequest;
-import java.net.URI;
-import java.util.HashMap;
-import java.util.Map;
 import java.util.Arrays;
 
 @RestController
@@ -47,31 +43,27 @@ public class CallController {
     }
     
     @PostMapping("/start-call")
-    public ResponseEntity<Map<String, Object>> startCall(HttpServletRequest request) {
+    public ResponseEntity<Map<String, Object>> startCall(@RequestBody Map<String, Object> requestBody) {
         
         Map<String, Object> response = new HashMap<>();
         
         try {
-            // Log all parameters for debugging
+            // Log the JSON request body
             System.out.println("=== START CALL REQUEST DEBUG ===");
-            request.getParameterMap().forEach((key, values) -> {
-                System.out.println("Parameter: " + key + " = " + Arrays.toString(values));
-            });
-            System.out.println("Content-Type: " + request.getContentType());
-            System.out.println("Method: " + request.getMethod());
+            System.out.println("Request Body: " + requestBody);
             System.out.println("=== END DEBUG ===");
             
-            // Extract parameters manually
-            String targetNumber = request.getParameter("phoneNumber");
-            if (targetNumber == null) targetNumber = request.getParameter("to");
-            if (targetNumber == null) targetNumber = request.getParameter("phone");
+            // Extract parameters from JSON
+            String targetNumber = (String) requestBody.get("phoneNumber");
+            if (targetNumber == null) targetNumber = (String) requestBody.get("to");
+            if (targetNumber == null) targetNumber = (String) requestBody.get("phone");
             
-            String sourceLang = request.getParameter("fromLanguage");
-            if (sourceLang == null) sourceLang = request.getParameter("sourceLanguage");
+            String sourceLang = (String) requestBody.get("fromLanguage");
+            if (sourceLang == null) sourceLang = (String) requestBody.get("sourceLanguage");
             if (sourceLang == null) sourceLang = "en";
             
-            String targetLang = request.getParameter("toLanguage");
-            if (targetLang == null) targetLang = request.getParameter("targetLanguage");
+            String targetLang = (String) requestBody.get("toLanguage");
+            if (targetLang == null) targetLang = (String) requestBody.get("targetLanguage");
             if (targetLang == null) targetLang = "es";
             
             // Convert short codes to full codes
