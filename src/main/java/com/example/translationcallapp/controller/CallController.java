@@ -45,15 +45,14 @@ public class CallController {
     }
     
     @PostMapping("/start-call")
-    public ResponseEntity<Map<String, Object>> startCall(@RequestBody Map<String, String> request) {
+    public ResponseEntity<Map<String, Object>> startCall(
+            @RequestParam String to,
+            @RequestParam(required = false, defaultValue = "en-US") String sourceLanguage,
+            @RequestParam(required = false, defaultValue = "es-ES") String targetLanguage) {
         
         Map<String, Object> response = new HashMap<>();
         
         try {
-            String to = request.get("to");
-            String sourceLanguage = request.getOrDefault("sourceLanguage", "en-US");
-            String targetLanguage = request.getOrDefault("targetLanguage", "es-ES");
-            
             if (to == null || to.trim().isEmpty()) {
                 response.put("status", "error");
                 response.put("message", "Phone number is required");
