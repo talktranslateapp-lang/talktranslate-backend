@@ -46,20 +46,20 @@ public class CallController {
     
     @PostMapping("/start-call")
     public ResponseEntity<Map<String, Object>> startCall(
-            @RequestParam String to,
+            @RequestParam String phoneNumber,
             @RequestParam(required = false, defaultValue = "en-US") String sourceLanguage,
             @RequestParam(required = false, defaultValue = "es-ES") String targetLanguage) {
         
         Map<String, Object> response = new HashMap<>();
         
         try {
-            if (to == null || to.trim().isEmpty()) {
+            if (phoneNumber == null || phoneNumber.trim().isEmpty()) {
                 response.put("status", "error");
                 response.put("message", "Phone number is required");
                 return ResponseEntity.badRequest().body(response);
             }
             
-            if (!isValidPhoneNumber(to)) {
+            if (!isValidPhoneNumber(phoneNumber)) {
                 response.put("status", "error");
                 response.put("message", "Invalid phone number format");
                 return ResponseEntity.badRequest().body(response);
@@ -74,11 +74,11 @@ public class CallController {
             initTwilio();
             
             // Create TwiML URL with parameters for translation
-            String twimlUrl = baseUrl + "/api/voice?to=" + to + 
+            String twimlUrl = baseUrl + "/api/voice?to=" + phoneNumber + 
                              "&source=" + sourceLanguage + "&target=" + targetLanguage;
             
             Call call = Call.creator(
-                new PhoneNumber(to),
+                new PhoneNumber(phoneNumber),
                 new PhoneNumber(twilioPhoneNumber),
                 URI.create(twimlUrl)
             ).create();
@@ -86,7 +86,7 @@ public class CallController {
             response.put("status", "success");
             response.put("message", "Translation call initiated successfully");
             response.put("callSid", call.getSid());
-            response.put("to", to);
+            response.put("to", phoneNumber);
             response.put("from", twilioPhoneNumber);
             response.put("sourceLanguage", sourceLanguage);
             response.put("targetLanguage", targetLanguage);
