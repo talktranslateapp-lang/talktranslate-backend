@@ -47,31 +47,29 @@ public class CallController {
     @PostMapping("/start-call")
     public ResponseEntity<Map<String, Object>> startCall(
             @RequestParam String to,
-            @RequestParam(required = false, defaultValue = "en") String sourceLanguage,
-            @RequestParam(required = false, defaultValue = "es") String targetLanguage) {
+            @RequestParam(required = false, defaultValue = "en-US") String sourceLanguage,
+            @RequestParam(required = false, defaultValue = "es-ES") String targetLanguage) {
         
         Map<String, Object> response = new HashMap<>();
         
         try {
-            // Validate phone number format
             if (!isValidPhoneNumber(to)) {
                 response.put("status", "error");
                 response.put("message", "Invalid phone number format");
                 return ResponseEntity.badRequest().body(response);
             }
             
-            // Check if Twilio is configured
             if (accountSid.isEmpty() || authToken.isEmpty() || twilioPhoneNumber.isEmpty()) {
                 response.put("status", "error");
                 response.put("message", "Twilio credentials not configured");
                 return ResponseEntity.status(HttpStatus.SERVICE_UNAVAILABLE).body(response);
             }
             
-            // Initialize Twilio
             initTwilio();
             
-            // Create the call
-            String twimlUrl = baseUrl + "/api/voice?to=" + to + "&source=" + sourceLanguage + "&target=" + targetLanguage;
+            // Create TwiML URL with parameters for translation
+            String twimlUrl = baseUrl + "/api/voice?to=" + to + 
+                             "&source=" + sourceLanguage + "&target=" + targetLanguage;
             
             Call call = Call.creator(
                 new PhoneNumber(to),
@@ -80,7 +78,7 @@ public class CallController {
             ).create();
             
             response.put("status", "success");
-            response.put("message", "Call initiated successfully");
+            response.put("message", "Translation call initiated successfully");
             response.put("callSid", call.getSid());
             response.put("to", to);
             response.put("from", twilioPhoneNumber);
@@ -99,21 +97,31 @@ public class CallController {
     @PostMapping(value = "/voice", produces = MediaType.APPLICATION_XML_VALUE)
     public String handleVoiceWebhook(
             @RequestParam(required = false) String to,
-            @RequestParam(required = false, defaultValue = "en") String source,
-            @RequestParam(required = false, defaultValue = "es") String target) {
+            @RequestParam(required = false, defaultValue = "en-US") String source,
+            @RequestParam(required = false, defaultValue = "es-ES") String target) {
         
         try {
-            // Simple TwiML response using string concatenation
+            String streamUrl = baseUrl.replace("https://", "wss://") + "/stream?source=" + source + "&target=" + target;
+            
             StringBuilder twiml = new StringBuilder();
             twiml.append("<?xml version=\"1.0\" encoding=\"UTF-8\"?>");
             twiml.append("<Response>");
-            twiml.append("<Say voice=\"alice\">");
-            twiml.append("Welcome to the translation service. You will be connected with real-time translation from ");
-            twiml.append(source).append(" to ").append(target).append(".");
-            twiml.append("</Say>");
             
+            // Start media streaming for real-time translation
+            twiml.append("<Start>");
+            twiml.append("<Stream url=\"").append(streamUrl).append("\" />");
+            twiml.append("</Start>");
+            
+            // Welcome message
+            twiml.append("<Say voice=\"alice\">");
+            twiml.append("Welcome to the real-time translation service. ");
+            twiml.append("You will be connected with translation from ");
+            twiml.append(getLanguageName(source)).append(" to ").append(getLanguageName(target));
+            twiml.append(".</Say>");
+            
+            // Connect to the target number
             if (to != null && !to.isEmpty()) {
-                twiml.append("<Dial>");
+                twiml.append("<Dial timeout=\"30\" callerId=\"").append(twilioPhoneNumber).append("\">");
                 twiml.append("<Number>").append(to).append("</Number>");
                 twiml.append("</Dial>");
             } else {
@@ -127,8 +135,7 @@ public class CallController {
             return twiml.toString();
             
         } catch (Exception e) {
-            // Fallback response
-            return "<?xml version=\"1.0\" encoding=\"UTF-8\"?><Response><Say voice=\"alice\">Sorry, there was an error processing your call. Please try again later.</Say></Response>";
+            return "<?xml version=\"1.0\" encoding=\"UTF-8\"?><Response><Say voice=\"alice\">Sorry, there was an error setting up translation. Please try again.</Say></Response>";
         }
     }
     
@@ -162,20 +169,29 @@ public class CallController {
         }
     }
     
+    private String getLanguageName(String languageCode) {
+        switch (languageCode) {
+            case "en-US": return "English";
+            case "es-ES": return "Spanish";
+            case "fr-FR": return "French";
+            case "de-DE": return "German";
+            case "it-IT": return "Italian";
+            case "pt-BR": return "Portuguese";
+            default: return languageCode;
+        }
+    }
+    
     private boolean isValidPhoneNumber(String phoneNumber) {
         if (phoneNumber == null || phoneNumber.trim().isEmpty()) {
             return false;
         }
         
-        // Remove all non-digit characters except +
         String cleaned = phoneNumber.replaceAll("[^+\\d]", "");
         
-        // Must start with + and have at least 10 digits
         if (!cleaned.startsWith("+")) {
-            cleaned = "+1" + cleaned; // Default to US country code
+            cleaned = "+1" + cleaned;
         }
         
-        // Basic validation: + followed by 10-15 digits
         return cleaned.matches("\\+\\d{10,15}");
     }
 }
