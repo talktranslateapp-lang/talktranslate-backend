@@ -3,17 +3,12 @@ package com.example.translationcallapp.controller;
 import com.twilio.Twilio;
 import com.twilio.rest.api.v2010.account.Call;
 import com.twilio.type.PhoneNumber;
-import com.twilio.twiml.VoiceResponse;
-import com.twilio.twiml.voice.Say;
-import com.twilio.twiml.voice.Dial;
-import com.twilio.twiml.voice.Number;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.http.MediaType;
 import org.springframework.web.bind.annotation.*;
 import org.springframework.http.ResponseEntity;
 import org.springframework.http.HttpStatus;
 
-import javax.annotation.PostConstruct;
 import java.net.URI;
 import java.util.HashMap;
 import java.util.Map;
@@ -35,8 +30,7 @@ public class CallController {
     @Value("${app.base.url:https://talktranslate-backend-production.up.railway.app}")
     private String baseUrl;
     
-    @PostConstruct
-    public void initTwilio() {
+    private void initTwilio() {
         if (!accountSid.isEmpty() && !authToken.isEmpty()) {
             Twilio.init(accountSid, authToken);
         }
@@ -73,6 +67,9 @@ public class CallController {
                 return ResponseEntity.status(HttpStatus.SERVICE_UNAVAILABLE).body(response);
             }
             
+            // Initialize Twilio
+            initTwilio();
+            
             // Create the call
             String twimlUrl = baseUrl + "/api/voice?to=" + to + "&source=" + sourceLanguage + "&target=" + targetLanguage;
             
@@ -106,45 +103,32 @@ public class CallController {
             @RequestParam(required = false, defaultValue = "es") String target) {
         
         try {
-            VoiceResponse.Builder responseBuilder = VoiceResponse.builder();
+            // Simple TwiML response using string concatenation
+            StringBuilder twiml = new StringBuilder();
+            twiml.append("<?xml version=\"1.0\" encoding=\"UTF-8\"?>");
+            twiml.append("<Response>");
+            twiml.append("<Say voice=\"alice\">");
+            twiml.append("Welcome to the translation service. You will be connected with real-time translation from ");
+            twiml.append(source).append(" to ").append(target).append(".");
+            twiml.append("</Say>");
             
-            // Welcome message
-            Say welcomeMessage = Say.builder()
-                .voice(Say.Voice.ALICE)
-                .language(Say.Language.EN)
-                .speech("Welcome to the translation service. You will be connected to " + to + " with real-time translation from " + source + " to " + target + ".")
-                .build();
-            
-            responseBuilder.say(welcomeMessage);
-            
-            // Connect to the target number if provided
             if (to != null && !to.isEmpty()) {
-                Number number = Number.builder(to).build();
-                Dial dial = Dial.builder()
-                        .number(number)
-                        .build();
-                responseBuilder.dial(dial);
+                twiml.append("<Dial>");
+                twiml.append("<Number>").append(to).append("</Number>");
+                twiml.append("</Dial>");
             } else {
-                // If no target number, just play a message
-                Say errorMessage = Say.builder()
-                    .voice(Say.Voice.ALICE)
-                    .speech("No target number provided. Please try again.")
-                    .build();
-                responseBuilder.say(errorMessage);
+                twiml.append("<Say voice=\"alice\">");
+                twiml.append("No target number provided. Please try again.");
+                twiml.append("</Say>");
             }
             
-            VoiceResponse response = responseBuilder.build();
-            return response.toXml();
+            twiml.append("</Response>");
+            
+            return twiml.toString();
             
         } catch (Exception e) {
-            // Fallback response in case of error
-            VoiceResponse errorResponse = VoiceResponse.builder()
-                .say(Say.builder()
-                    .voice(Say.Voice.ALICE)
-                    .speech("Sorry, there was an error processing your call. Please try again later.")
-                    .build())
-                .build();
-            return errorResponse.toXml();
+            // Fallback response
+            return "<?xml version=\"1.0\" encoding=\"UTF-8\"?><Response><Say voice=\"alice\">Sorry, there was an error processing your call. Please try again later.</Say></Response>";
         }
     }
     
@@ -159,6 +143,7 @@ public class CallController {
                 return ResponseEntity.status(HttpStatus.SERVICE_UNAVAILABLE).body(response);
             }
             
+            initTwilio();
             Call call = Call.fetcher(callSid).fetch();
             
             response.put("status", "success");
@@ -173,34 +158,6 @@ public class CallController {
         } catch (Exception e) {
             response.put("status", "error");
             response.put("message", "Failed to fetch call status: " + e.getMessage());
-            return ResponseEntity.status(HttpStatus.INTERNAL_SERVER_ERROR).body(response);
-        }
-    }
-    
-    @PostMapping("/end-call/{callSid}")
-    public ResponseEntity<Map<String, String>> endCall(@PathVariable String callSid) {
-        Map<String, String> response = new HashMap<>();
-        
-        try {
-            if (accountSid.isEmpty() || authToken.isEmpty()) {
-                response.put("status", "error");
-                response.put("message", "Twilio credentials not configured");
-                return ResponseEntity.status(HttpStatus.SERVICE_UNAVAILABLE).body(response);
-            }
-            
-            Call call = Call.updater(callSid)
-                .setStatus(Call.UpdateStatus.COMPLETED)
-                .update();
-            
-            response.put("status", "success");
-            response.put("message", "Call ended successfully");
-            response.put("callSid", call.getSid());
-            
-            return ResponseEntity.ok(response);
-            
-        } catch (Exception e) {
-            response.put("status", "error");
-            response.put("message", "Failed to end call: " + e.getMessage());
             return ResponseEntity.status(HttpStatus.INTERNAL_SERVER_ERROR).body(response);
         }
     }
