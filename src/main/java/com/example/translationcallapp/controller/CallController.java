@@ -154,10 +154,12 @@ public class CallController {
             twiml.append(getLanguageName(source)).append(" to ").append(getLanguageName(target));
             twiml.append(".</Say>");
             
-            // Connect to the target number
+            // Connect to the target number - FIXED: Added + prefix
             if (to != null && !to.isEmpty()) {
+                // Remove + if it exists, then add it back to ensure proper format
+                String cleanNumber = to.startsWith("+") ? to.substring(1) : to;
                 twiml.append("<Dial timeout=\"30\" callerId=\"").append(twilioPhoneNumber).append("\">");
-                twiml.append("<Number>").append(to).append("</Number>");
+                twiml.append("<Number>+").append(cleanNumber).append("</Number>");
                 twiml.append("</Dial>");
             } else {
                 twiml.append("<Say voice=\"alice\">");
