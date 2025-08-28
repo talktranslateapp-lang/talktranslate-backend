@@ -3,7 +3,10 @@ package com.example.translationcallapp.service;
 import com.google.api.gax.rpc.BidiStreamingCallable;
 import com.google.cloud.speech.v1.*;
 import com.google.cloud.texttospeech.v1.*;
-import com.google.cloud.translate.v3.*;
+import com.google.cloud.translate.v3.TranslationServiceClient;
+import com.google.cloud.translate.v3.TranslateTextRequest;
+import com.google.cloud.translate.v3.TranslateTextResponse;
+import com.google.cloud.translate.v3.LocationName;
 import com.google.protobuf.ByteString;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Service;
@@ -29,9 +32,10 @@ public class GoogleCloudService {
             speechClient = SpeechClient.create();
             textToSpeechClient = TextToSpeechClient.create();
             translationClient = TranslationServiceClient.create();
-            System.out.println("Google Cloud services initialized successfully");
+            System.out.println("Google Cloud services initialized successfully for project: " + projectId);
         } catch (IOException e) {
             System.err.println("Failed to initialize Google Cloud services: " + e.getMessage());
+            e.printStackTrace();
         }
     }
     
@@ -40,6 +44,7 @@ public class GoogleCloudService {
         if (speechClient != null) speechClient.close();
         if (textToSpeechClient != null) textToSpeechClient.close();
         if (translationClient != null) translationClient.close();
+        System.out.println("Google Cloud services closed");
     }
     
     public BidiStreamingCallable<StreamingRecognizeRequest, StreamingRecognizeResponse> createSpeechStream(String sourceLanguage) {
@@ -74,9 +79,13 @@ public class GoogleCloudService {
                         .build();
                 
                 TranslateTextResponse response = translationClient.translateText(request);
-                return response.getTranslations(0).getTranslatedText();
+                String translatedText = response.getTranslations(0).getTranslatedText();
+                
+                System.out.println("Translated '" + text + "' from " + sourceLanguage + " to " + targetLanguage + ": " + translatedText);
+                return translatedText;
+                
             } catch (Exception e) {
-                System.err.println("Translation failed: " + e.getMessage());
+                System.err.println("Translation failed for text '" + text + "': " + e.getMessage());
                 throw new RuntimeException("Translation failed", e);
             }
         });
@@ -107,9 +116,12 @@ public class GoogleCloudService {
                                 .setAudioConfig(audioConfig)
                                 .build());
                 
-                return response.getAudioContent().toByteArray();
+                byte[] audioData = response.getAudioContent().toByteArray();
+                System.out.println("Generated speech for text '" + text + "' in " + languageCode + " (" + audioData.length + " bytes)");
+                return audioData;
+                
             } catch (Exception e) {
-                System.err.println("Text-to-speech failed: " + e.getMessage());
+                System.err.println("Text-to-speech failed for text '" + text + "': " + e.getMessage());
                 throw new RuntimeException("Text-to-speech failed", e);
             }
         });
