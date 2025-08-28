@@ -45,25 +45,38 @@ public class CallController {
     }
     
     @PostMapping("/start-call")
-    public ResponseEntity<Map<String, Object>> startCall(@RequestBody Map<String, Object> requestBody) {
+    public ResponseEntity<Map<String, Object>> startCall(
+            @RequestParam(required = false) String phoneNumber,
+            @RequestParam(required = false) String to,
+            @RequestParam(required = false) String phone,
+            @RequestParam(required = false, defaultValue = "en") String fromLanguage,
+            @RequestParam(required = false) String sourceLanguage,
+            @RequestParam(required = false, defaultValue = "es") String toLanguage,
+            @RequestParam(required = false) String targetLanguage) {
         
         Map<String, Object> response = new HashMap<>();
         
         try {
             System.out.println("=== START CALL REQUEST DEBUG ===");
-            System.out.println("Request Body: " + requestBody);
+            System.out.println("phoneNumber: " + phoneNumber);
+            System.out.println("to: " + to);
+            System.out.println("phone: " + phone);
+            System.out.println("fromLanguage: " + fromLanguage);
+            System.out.println("sourceLanguage: " + sourceLanguage);
+            System.out.println("toLanguage: " + toLanguage);
+            System.out.println("targetLanguage: " + targetLanguage);
             System.out.println("=== END DEBUG ===");
             
-            String targetNumber = (String) requestBody.get("phoneNumber");
-            if (targetNumber == null) targetNumber = (String) requestBody.get("to");
-            if (targetNumber == null) targetNumber = (String) requestBody.get("phone");
+            // Try to get phone number from any parameter name
+            String targetNumber = phoneNumber;
+            if (targetNumber == null || targetNumber.isEmpty()) targetNumber = to;
+            if (targetNumber == null || targetNumber.isEmpty()) targetNumber = phone;
             
-            String sourceLang = (String) requestBody.get("fromLanguage");
-            if (sourceLang == null) sourceLang = (String) requestBody.get("sourceLanguage");
+            // Get language parameters
+            String sourceLang = (fromLanguage != null && !fromLanguage.isEmpty()) ? fromLanguage : sourceLanguage;
+            String targetLang = (toLanguage != null && !toLanguage.isEmpty()) ? toLanguage : targetLanguage;
+            
             if (sourceLang == null) sourceLang = "en";
-            
-            String targetLang = (String) requestBody.get("toLanguage");
-            if (targetLang == null) targetLang = (String) requestBody.get("targetLanguage");
             if (targetLang == null) targetLang = "es";
             
             sourceLang = convertLanguageCode(sourceLang);
