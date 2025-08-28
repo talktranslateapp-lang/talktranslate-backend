@@ -6,7 +6,7 @@ import com.google.cloud.texttospeech.v1.*;
 import com.google.cloud.translate.v3.TranslationServiceClient;
 import com.google.cloud.translate.v3.TranslateTextRequest;
 import com.google.cloud.translate.v3.TranslateTextResponse;
-import com.google.cloud.translate.v3.LocationName;
+
 import com.google.protobuf.ByteString;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Service;
@@ -68,7 +68,7 @@ public class GoogleCloudService {
     public CompletableFuture<String> translateText(String text, String sourceLanguage, String targetLanguage) {
         return CompletableFuture.supplyAsync(() -> {
             try {
-                LocationName parent = LocationName.of(projectId, "global");
+                com.google.cloud.translate.v3.LocationName parent = com.google.cloud.translate.v3.LocationName.of(projectId, "global");
                 
                 TranslateTextRequest request = TranslateTextRequest.newBuilder()
                         .setParent(parent.toString())
