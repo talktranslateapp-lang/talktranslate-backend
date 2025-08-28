@@ -3,6 +3,8 @@ package com.example.translationcallapp.controller;
 import com.twilio.Twilio;
 import com.twilio.rest.api.v2010.account.Call;
 import com.twilio.type.PhoneNumber;
+import com.twilio.jwt.accesstoken.AccessToken;
+import com.twilio.jwt.accesstoken.VoiceGrant;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.http.MediaType;
 import org.springframework.web.bind.annotation.*;
@@ -27,6 +29,15 @@ public class CallController {
     @Value("${twilio.phone.number:}")
     private String twilioPhoneNumber;
     
+    @Value("${twilio.api.key:}")
+    private String apiKey;
+    
+    @Value("${twilio.api.secret:}")
+    private String apiSecret;
+    
+    @Value("${twilio.twiml.app.sid:}")
+    private String twimlAppSid;
+    
     @Value("${app.base.url:https://talktranslate-backend-production.up.railway.app}")
     private String baseUrl;
     
@@ -44,6 +55,47 @@ public class CallController {
         return ResponseEntity.ok(response);
     }
     
+    @PostMapping("/generate-token")
+    public ResponseEntity<Map<String, String>> generateToken(@RequestParam String identity) {
+        Map<String, String> response = new HashMap<>();
+        
+        try {
+            if (apiKey.isEmpty() || apiSecret.isEmpty()) {
+                response.put("error", "Twilio API credentials not configured");
+                return ResponseEntity.status(HttpStatus.SERVICE_UNAVAILABLE).body(response);
+            }
+            
+            // Create access token for Twilio Client SDK
+            AccessToken accessToken = new AccessToken.Builder(
+                accountSid,
+                apiKey,
+                apiSecret
+            )
+            .identity(identity)
+            .build();
+            
+            // Add Voice Grant for making calls
+            VoiceGrant voiceGrant = new VoiceGrant();
+            if (!twimlAppSid.isEmpty()) {
+                voiceGrant.setOutgoingApplicationSid(twimlAppSid);
+            }
+            voiceGrant.setIncomingAllow(true);
+            accessToken.addGrant(voiceGrant);
+            
+            response.put("token", accessToken.toJwt());
+            response.put("identity", identity);
+            
+            System.out.println("Generated access token for identity: " + identity);
+            
+            return ResponseEntity.ok(response);
+            
+        } catch (Exception e) {
+            System.err.println("Failed to generate access token: " + e.getMessage());
+            response.put("error", "Failed to generate token: " + e.getMessage());
+            return ResponseEntity.status(HttpStatus.INTERNAL_SERVER_ERROR).body(response);
+        }
+    }
+    
     @PostMapping("/start-call")
     public ResponseEntity<Map<String, Object>> startCall(
             @RequestParam(required = false) String phoneNumber,
@@ -57,22 +109,16 @@ public class CallController {
         Map<String, Object> response = new HashMap<>();
         
         try {
-            System.out.println("=== START CALL REQUEST DEBUG ===");
+            System.out.println("=== START CALL REQUEST (Web-based) ===");
             System.out.println("phoneNumber: " + phoneNumber);
-            System.out.println("to: " + to);
-            System.out.println("phone: " + phone);
             System.out.println("fromLanguage: " + fromLanguage);
-            System.out.println("sourceLanguage: " + sourceLanguage);
             System.out.println("toLanguage: " + toLanguage);
-            System.out.println("targetLanguage: " + targetLanguage);
             System.out.println("=== END DEBUG ===");
             
-            // Try to get phone number from any parameter name
             String targetNumber = phoneNumber;
             if (targetNumber == null || targetNumber.isEmpty()) targetNumber = to;
             if (targetNumber == null || targetNumber.isEmpty()) targetNumber = phone;
             
-            // Get language parameters
             String sourceLang = (fromLanguage != null && !fromLanguage.isEmpty()) ? fromLanguage : sourceLanguage;
             String targetLang = (toLanguage != null && !toLanguage.isEmpty()) ? toLanguage : targetLanguage;
             
@@ -82,105 +128,79 @@ public class CallController {
             sourceLang = convertLanguageCode(sourceLang);
             targetLang = convertLanguageCode(targetLang);
             
-            System.out.println("Extracted - Phone: " + targetNumber + ", From: " + sourceLang + ", To: " + targetLang);
-            
             if (targetNumber == null || targetNumber.trim().isEmpty()) {
                 response.put("status", "error");
                 response.put("message", "Phone number is required");
                 return ResponseEntity.badRequest().body(response);
             }
             
-            if (!isValidPhoneNumber(targetNumber)) {
-                response.put("status", "error");
-                response.put("message", "Invalid phone number format");
-                return ResponseEntity.badRequest().body(response);
-            }
-            
-            if (accountSid.isEmpty() || authToken.isEmpty() || twilioPhoneNumber.isEmpty()) {
-                response.put("status", "error");
-                response.put("message", "Twilio credentials not configured");
-                return ResponseEntity.status(HttpStatus.SERVICE_UNAVAILABLE).body(response);
-            }
-            
-            initTwilio();
-            
             // Generate unique conference ID
             String conferenceId = "translation-" + System.currentTimeMillis();
             
-            // Create TwiML URL for conference with parameters
-            String twimlUrl = baseUrl + "/api/voice?conference=" + conferenceId + 
-                             "&to=" + targetNumber + "&source=" + sourceLang + "&target=" + targetLang;
-            
-            System.out.println("Creating conference call to: " + targetNumber + " from: " + twilioPhoneNumber);
-            
-            Call call = Call.creator(
-                new PhoneNumber(targetNumber),
-                new PhoneNumber(twilioPhoneNumber),
-                URI.create(twimlUrl)
-            ).create();
-            
-            System.out.println("Call created successfully: " + call.getSid() + " Conference: " + conferenceId);
-            
             response.put("status", "success");
-            response.put("message", "Translation conference call initiated successfully");
-            response.put("callSid", call.getSid());
+            response.put("message", "Conference ready for web-based calling");
             response.put("conferenceId", conferenceId);
             response.put("to", targetNumber);
-            response.put("from", twilioPhoneNumber);
             response.put("sourceLanguage", sourceLang);
             response.put("targetLanguage", targetLang);
+            response.put("instructions", "Use Twilio Client SDK to join conference: " + conferenceId);
             
             return ResponseEntity.ok(response);
             
         } catch (Exception e) {
             System.out.println("Error in start-call: " + e.getMessage());
-            e.printStackTrace();
             response.put("status", "error");
-            response.put("message", "Failed to initiate call: " + e.getMessage());
+            response.put("message", "Failed to prepare call: " + e.getMessage());
             return ResponseEntity.status(HttpStatus.INTERNAL_SERVER_ERROR).body(response);
         }
     }
     
     @PostMapping(value = "/voice", produces = MediaType.APPLICATION_XML_VALUE)
     public String handleVoiceWebhook(
-            @RequestParam(required = false) String conference,
-            @RequestParam(required = false) String to,
-            @RequestParam(required = false, defaultValue = "en-US") String source,
-            @RequestParam(required = false, defaultValue = "es-ES") String target) {
+            @RequestParam(required = false) String To,
+            @RequestParam(required = false) String From,
+            @RequestParam(required = false) String sourceLanguage,
+            @RequestParam(required = false) String targetLanguage) {
         
         try {
-            System.out.println("Voice webhook called - Conference: " + conference + ", To: " + to + ", Source: " + source + ", Target: " + target);
+            System.out.println("Voice webhook for web call - To: " + To + ", From: " + From + 
+                             ", Source: " + sourceLanguage + ", Target: " + targetLanguage);
+            
+            // Generate conference ID based on call parameters
+            String conferenceId = "translation-" + System.currentTimeMillis();
             
             StringBuilder twiml = new StringBuilder();
             twiml.append("<?xml version=\"1.0\" encoding=\"UTF-8\"?>");
             twiml.append("<Response>");
             
             // Start media streaming for translation
-            String streamUrl = baseUrl.replace("https://", "wss://") + "/stream?source=" + source + "&target=" + target;
-            twiml.append("<Start>");
-            twiml.append("<Stream url=\"").append(streamUrl).append("\" />");
-            twiml.append("</Start>");
+            if (sourceLanguage != null && targetLanguage != null) {
+                String streamUrl = baseUrl.replace("https://", "wss://") + "/stream?source=" + 
+                                 sourceLanguage + "&target=" + targetLanguage;
+                twiml.append("<Start>");
+                twiml.append("<Stream url=\"").append(streamUrl).append("\" />");
+                twiml.append("</Start>");
+            }
             
             twiml.append("<Say voice=\"alice\">");
-            twiml.append("Welcome to the translation service. Joining conference with translation from ");
-            twiml.append(getLanguageName(source)).append(" to ").append(getLanguageName(target)).append(".");
+            twiml.append("Welcome to the translation service. Joining conference now.");
             twiml.append("</Say>");
             
-            // Join conference room
+            // Join conference
             twiml.append("<Dial>");
             twiml.append("<Conference statusCallback=\"").append(baseUrl).append("/api/conference-status\">");
-            twiml.append(conference);
+            twiml.append(conferenceId);
             twiml.append("</Conference>");
             twiml.append("</Dial>");
             
             twiml.append("</Response>");
             
-            // Invite the target number to the same conference
-            if (to != null && !to.isEmpty() && conference != null) {
-                inviteToConference(to, conference, target, source); // Reverse languages for second participant
+            // Invite the phone participant to the same conference
+            if (To != null && !To.isEmpty()) {
+                inviteToConference(To, conferenceId, targetLanguage, sourceLanguage);
             }
             
-            System.out.println("Generated TwiML: " + twiml.toString());
+            System.out.println("Generated web call TwiML: " + twiml.toString());
             
             return twiml.toString();
             
@@ -203,16 +223,14 @@ public class CallController {
             twiml.append("<?xml version=\"1.0\" encoding=\"UTF-8\"?>");
             twiml.append("<Response>");
             
-            // Add media streaming for this participant too
+            // Add media streaming for phone participant
             String streamUrl = baseUrl.replace("https://", "wss://") + "/stream?source=" + source + "&target=" + target;
             twiml.append("<Start>");
             twiml.append("<Stream url=\"").append(streamUrl).append("\" />");
             twiml.append("</Start>");
             
             twiml.append("<Say voice=\"alice\">");
-            twiml.append("You have been invited to a translation call with ");
-            twiml.append(getLanguageName(source)).append(" to ").append(getLanguageName(target));
-            twiml.append(" translation. Joining now.");
+            twiml.append("You have been invited to a translation call. Joining conference now.");
             twiml.append("</Say>");
             
             twiml.append("<Dial>");
@@ -252,8 +270,8 @@ public class CallController {
             String inviteTwimlUrl = baseUrl + "/api/conference-invite?conference=" + conferenceId + 
                                    "&source=" + source + "&target=" + target;
             
-            // Small delay to ensure first participant joins first
-            Thread.sleep(2000);
+            // Small delay to ensure web participant joins first
+            Thread.sleep(3000);
             
             Call.creator(
                 new PhoneNumber("+" + cleanNumber),
