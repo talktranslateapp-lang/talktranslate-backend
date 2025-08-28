@@ -136,27 +136,23 @@ public class CallController {
         try {
             System.out.println("Voice webhook called - To: " + to + ", Source: " + source + ", Target: " + target);
             
-            String streamUrl = baseUrl.replace("https://", "wss://") + "/stream?source=" + source + "&target=" + target;
-            
             StringBuilder twiml = new StringBuilder();
             twiml.append("<?xml version=\"1.0\" encoding=\"UTF-8\"?>");
             twiml.append("<Response>");
             
-            // Start media streaming for real-time translation
-            twiml.append("<Start>");
-            twiml.append("<Stream url=\"").append(streamUrl).append("\" />");
-            twiml.append("</Start>");
+            // TEMPORARILY DISABLED - WebSocket streaming until Google Cloud is fixed
+            // String streamUrl = baseUrl.replace("https://", "wss://") + "/stream?source=" + source + "&target=" + target;
+            // twiml.append("<Start>");
+            // twiml.append("<Stream url=\"").append(streamUrl).append("\" />");
+            // twiml.append("</Start>");
             
             // Welcome message
             twiml.append("<Say voice=\"alice\">");
-            twiml.append("Welcome to the real-time translation service. ");
-            twiml.append("You will be connected with translation from ");
-            twiml.append(getLanguageName(source)).append(" to ").append(getLanguageName(target));
-            twiml.append(".</Say>");
+            twiml.append("Welcome to the translation service. Connecting your call now.");
+            twiml.append("</Say>");
             
-            // Connect to the target number - FIXED: Added + prefix
+            // Connect to the target number - FIXED: Proper phone number format
             if (to != null && !to.isEmpty()) {
-                // Remove + if it exists, then add it back to ensure proper format
                 String cleanNumber = to.startsWith("+") ? to.substring(1) : to;
                 twiml.append("<Dial timeout=\"30\" callerId=\"").append(twilioPhoneNumber).append("\">");
                 twiml.append("<Number>+").append(cleanNumber).append("</Number>");
@@ -175,7 +171,7 @@ public class CallController {
             
         } catch (Exception e) {
             System.out.println("Error in voice webhook: " + e.getMessage());
-            return "<?xml version=\"1.0\" encoding=\"UTF-8\"?><Response><Say voice=\"alice\">Sorry, there was an error setting up translation. Please try again.</Say></Response>";
+            return "<?xml version=\"1.0\" encoding=\"UTF-8\"?><Response><Say voice=\"alice\">Welcome to the translation service. Please hold while we connect your call.</Say></Response>";
         }
     }
     
