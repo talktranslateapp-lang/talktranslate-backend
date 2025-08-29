@@ -1,3 +1,22 @@
+package com.example.translationcallapp.service;
+
+import org.springframework.beans.factory.annotation.Value;
+import org.springframework.stereotype.Service;
+import lombok.extern.slf4j.Slf4j;
+import com.google.auth.oauth2.GoogleCredentials;
+import com.google.cloud.speech.v1.*;
+import com.google.cloud.texttospeech.v1.*;
+import com.google.cloud.translate.Translate;
+import com.google.cloud.translate.TranslateOptions;
+import com.google.cloud.translate.Translation;
+import com.google.protobuf.ByteString;
+
+import javax.annotation.PostConstruct;
+import javax.annotation.PreDestroy;
+import java.io.ByteArrayInputStream;
+import java.util.Arrays;
+import java.util.stream.Collectors;
+
 @Service
 @Slf4j
 public class GoogleCloudService {
@@ -50,11 +69,17 @@ public class GoogleCloudService {
     }
     
     public String speechToText(byte[] audioData, String languageCode) {
+        if (speechClient == null) {
+            log.error("Speech client is not initialized");
+            return "";
+        }
+        
         try {
             RecognitionConfig config = RecognitionConfig.newBuilder()
                 .setEncoding(RecognitionConfig.AudioEncoding.MULAW)
                 .setSampleRateHertz(8000)
                 .setLanguageCode(languageCode)
+                .setEnableAutomaticPunctuation(true)
                 .build();
             
             RecognitionAudio audio = RecognitionAudio.newBuilder()
@@ -63,9 +88,12 @@ public class GoogleCloudService {
             
             RecognizeResponse response = speechClient.recognize(config, audio);
             
-            return response.getResultsList().stream()
+            String transcript = response.getResultsList().stream()
                 .map(result -> result.getAlternativesList().get(0).getTranscript())
                 .collect(Collectors.joining(" "));
+                
+            log.debug("Speech-to-text result: {}", transcript);
+            return transcript;
                 
         } catch (Exception e) {
             log.error("Speech-to-text conversion failed", e);
@@ -74,6 +102,15 @@ public class GoogleCloudService {
     }
     
     public String translateText(String text, String targetLanguage, String sourceLanguage) {
+        if (translate == null) {
+            log.error("Translate client is not initialized");
+            return text;
+        }
+        
+        if (text == null || text.trim().isEmpty()) {
+            return text;
+        }
+        
         try {
             Translation translation = translate.translate(
                 text,
@@ -81,15 +118,26 @@ public class GoogleCloudService {
                 Translate.TranslateOption.targetLanguage(targetLanguage)
             );
             
-            return translation.getTranslatedText();
+            String translatedText = translation.getTranslatedText();
+            log.debug("Translation result: {} -> {}", text, translatedText);
+            return translatedText;
             
         } catch (Exception e) {
-            log.error("Text translation failed", e);
+            log.error("Text translation failed for text: '{}' from {} to {}", text, sourceLanguage, targetLanguage, e);
             return text; // Return original text if translation fails
         }
     }
     
     public byte[] textToSpeech(String text, String languageCode) {
+        if (textToSpeechClient == null) {
+            log.error("Text-to-speech client is not initialized");
+            return new byte[0];
+        }
+        
+        if (text == null || text.trim().isEmpty()) {
+            return new byte[0];
+        }
+        
         try {
             SynthesisInput input = SynthesisInput.newBuilder().setText(text).build();
             
@@ -107,12 +155,69 @@ public class GoogleCloudService {
                 input, voice, audioConfig
             );
             
-            return response.getAudioContent().toByteArray();
+            byte[] audioContent = response.getAudioContent().toByteArray();
+            log.debug("Text-to-speech generated {} bytes for text: {}", audioContent.length, text);
+            return audioContent;
             
         } catch (Exception e) {
-            log.error("Text-to-speech conversion failed", e);
+            log.error("Text-to-speech conversion failed for text: '{}' in language: {}", text, languageCode, e);
             return new byte[0];
         }
+    }
+    
+    public boolean isInitialized() {
+        return speechClient != null && textToSpeechClient != null && translate != null;
+    }
+    
+    public String getProjectId() {
+        return projectId;
+    }
+    
+    // Language code utilities
+    public String normalizeLanguageCode(String languageCode) {
+        if (languageCode == null) {
+            return "en-US";
+        }
+        
+        // Convert common language codes to Google Cloud format
+        switch (languageCode.toLowerCase()) {
+            case "en":
+            case "english":
+                return "en-US";
+            case "es":
+            case "spanish":
+                return "es-ES";
+            case "fr":
+            case "french":
+                return "fr-FR";
+            case "de":
+            case "german":
+                return "de-DE";
+            case "it":
+            case "italian":
+                return "it-IT";
+            case "ja":
+            case "japanese":
+                return "ja-JP";
+            case "ko":
+            case "korean":
+                return "ko-KR";
+            case "zh":
+            case "chinese":
+                return "zh-CN";
+            default:
+                return languageCode;
+        }
+    }
+    
+    // Extract language code for translation (remove region)
+    public String getTranslateLanguageCode(String fullLanguageCode) {
+        if (fullLanguageCode == null) {
+            return "en";
+        }
+        
+        String[] parts = fullLanguageCode.split("-");
+        return parts[0].toLowerCase();
     }
     
     @PreDestroy
@@ -120,10 +225,13 @@ public class GoogleCloudService {
         try {
             if (speechClient != null) {
                 speechClient.close();
+                log.info("Speech client closed");
             }
             if (textToSpeechClient != null) {
                 textToSpeechClient.close();
+                log.info("Text-to-speech client closed");
             }
+            log.info("Google Cloud services cleanup completed");
         } catch (Exception e) {
             log.error("Error closing Google Cloud clients", e);
         }
