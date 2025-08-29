@@ -220,6 +220,43 @@ public class GoogleCloudService {
         return parts[0].toLowerCase();
     }
     
+    // Get default voice name for language
+    public String getDefaultVoiceName(String languageCode) {
+        if (languageCode == null) {
+            return "en-US-Standard-A";
+        }
+        
+        // Map common language codes to default voices
+        switch (languageCode.toLowerCase()) {
+            case "en-us":
+                return "en-US-Standard-A";
+            case "es-es":
+                return "es-ES-Standard-A";
+            case "fr-fr":
+                return "fr-FR-Standard-A";
+            case "de-de":
+                return "de-DE-Standard-A";
+            case "it-it":
+                return "it-IT-Standard-A";
+            case "ja-jp":
+                return "ja-JP-Standard-A";
+            case "ko-kr":
+                return "ko-KR-Standard-A";
+            case "zh-cn":
+                return "cmn-CN-Standard-A";
+            default:
+                return "en-US-Standard-A";
+        }
+    }
+    
+    // Create speech stream for real-time processing (placeholder for streaming implementation)
+    public Object createSpeechStream(String languageCode) {
+        // This would be used for streaming speech recognition
+        // For now, return null as streaming is not implemented in this basic version
+        log.warn("createSpeechStream called but streaming not implemented. Using batch processing instead.");
+        return null;
+    }
+    
     @PreDestroy
     public void cleanup() {
         try {
