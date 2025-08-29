@@ -62,7 +62,7 @@ public class CallController {
             VoiceGrant voiceGrant = new VoiceGrant();
             voiceGrant.setOutgoingApplicationSid(twimlAppSid);
             voiceGrant.setIncomingAllow(true);
-            accessToken.addGrant(voiceGrant);
+            accessToken = accessToken.addGrant(voiceGrant);
             
             Map<String, String> response = new HashMap<>();
             response.put("token", accessToken.toJwt());
@@ -94,19 +94,13 @@ public class CallController {
                 .startConferenceOnEnter(true)
                 .endConferenceOnExit(false)
                 .record(Conference.Record.DO_NOT_RECORD)
-                .statusCallback("https://talktranslate-backend-production.up.railway.app/api/call/conference/status")
-                .statusCallbackEvent(Arrays.asList(
-                    Conference.Event.START,
-                    Conference.Event.END,
-                    Conference.Event.JOIN,
-                    Conference.Event.LEAVE
-                ));
+                .statusCallback("https://talktranslate-backend-production.up.railway.app/api/call/conference/status");
             
             Dial dial = new Dial.Builder()
-                .addConference(conferenceBuilder.build())
+                .conference(conferenceBuilder.build())
                 .build();
             
-            builder.addDial(dial);
+            builder.dial(dial);
             
             return ResponseEntity.ok()
                 .contentType(MediaType.APPLICATION_XML)
