@@ -96,4 +96,59 @@ public class CallController {
             String to = params.get("To");
             String callSid = params.get("CallSid");
             
-            logger.info("Incoming call - From: {}, To: {}, CallSid: {}", from,
+            logger.info("Incoming call - From: {}, To: {}, CallSid: {}", from, to, callSid);
+            
+            // Create conference room based on call participants
+            String conferenceName = "translation-call-" + callSid;
+            
+            VoiceResponse response = new VoiceResponse.Builder()
+                .say(new Say.Builder("Welcome to the translation service. Connecting you now.").build())
+                .dial(new Dial.Builder()
+                    .conference(new Conference.Builder(conferenceName)
+                        .startConferenceOnEnter(true)
+                        .endConferenceOnExit(false)
+                        .build())
+                    .build())
+                .build();
+
+            return ResponseEntity.ok(response.toXml());
+            
+        } catch (Exception e) {
+            logger.error("Error handling incoming call", e);
+            
+            VoiceResponse errorResponse = new VoiceResponse.Builder()
+                .say(new Say.Builder("Sorry, there was an error processing your call.").build())
+                .build();
+                
+            return ResponseEntity.ok(errorResponse.toXml());
+        }
+    }
+
+    @PostMapping("/voice/status")
+    public ResponseEntity<String> handleCallStatus(@RequestParam Map<String, String> params) {
+        String callSid = params.get("CallSid");
+        String callStatus = params.get("CallStatus");
+        
+        logger.info("Call status update - CallSid: {}, Status: {}", callSid, callStatus);
+        
+        return ResponseEntity.ok("OK");
+    }
+
+    @PostMapping("/conference/status")
+    public ResponseEntity<String> handleConferenceStatus(@RequestParam Map<String, String> params) {
+        String conferenceSid = params.get("ConferenceSid");
+        String statusCallbackEvent = params.get("StatusCallbackEvent");
+        
+        logger.info("Conference status update - ConferenceSid: {}, Event: {}", conferenceSid, statusCallbackEvent);
+        
+        return ResponseEntity.ok("OK");
+    }
+
+    @GetMapping("/health")
+    public ResponseEntity<Map<String, String>> health() {
+        Map<String, String> status = new HashMap<>();
+        status.put("status", "healthy");
+        status.put("service", "translation-call-app");
+        return ResponseEntity.ok(status);
+    }
+}

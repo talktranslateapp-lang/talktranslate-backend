@@ -10,267 +10,282 @@ import com.google.cloud.translate.Translate;
 import com.google.cloud.translate.TranslateOptions;
 import com.google.cloud.translate.Translation;
 import com.google.protobuf.ByteString;
-
 import javax.annotation.PostConstruct;
 import javax.annotation.PreDestroy;
 import java.io.ByteArrayInputStream;
 import java.util.Arrays;
-import java.util.stream.Collectors;
+import java.util.List;
+import java.util.concurrent.CompletableFuture;
 
 @Service
 @Slf4j
 public class GoogleCloudService {
-    
-    @Value("${google.cloud.project-id}")
+
+    @Value("${GOOGLE_CLOUD_PROJECT_ID}")
     private String projectId;
-    
-    @Value("${google.application.credentials.json}")
+
+    @Value("${GOOGLE_APPLICATION_CREDENTIALS_JSON}")
     private String credentialsJson;
-    
+
     private SpeechClient speechClient;
     private TextToSpeechClient textToSpeechClient;
-    private Translate translate;
-    
+    private Translate translateService;
+    private boolean initialized = false;
+
     @PostConstruct
     public void init() {
         try {
-            // Create credentials from JSON string
-            GoogleCredentials credentials = GoogleCredentials.fromStream(
-                new ByteArrayInputStream(credentialsJson.getBytes())
-            ).createScoped(Arrays.asList(
-                "https://www.googleapis.com/auth/cloud-platform"
-            ));
+            log.info("Initializing Google Cloud services...");
             
+            // Create credentials from JSON string
+            GoogleCredentials credentials = GoogleCredentials
+                .fromStream(new ByteArrayInputStream(credentialsJson.getBytes()))
+                .createScoped(Arrays.asList(
+                    "https://www.googleapis.com/auth/cloud-platform",
+                    "https://www.googleapis.com/auth/speech",
+                    "https://www.googleapis.com/auth/texttospeech",
+                    "https://www.googleapis.com/auth/cloud-translation"
+                ));
+
             // Initialize Speech-to-Text client
             SpeechSettings speechSettings = SpeechSettings.newBuilder()
                 .setCredentialsProvider(() -> credentials)
                 .build();
             this.speechClient = SpeechClient.create(speechSettings);
-            
+
             // Initialize Text-to-Speech client
             TextToSpeechSettings ttsSettings = TextToSpeechSettings.newBuilder()
                 .setCredentialsProvider(() -> credentials)
                 .build();
             this.textToSpeechClient = TextToSpeechClient.create(ttsSettings);
-            
-            // Initialize Translation client
-            TranslateOptions translateOptions = TranslateOptions.newBuilder()
+
+            // Initialize Translation service
+            this.translateService = TranslateOptions.newBuilder()
                 .setCredentials(credentials)
                 .setProjectId(projectId)
-                .build();
-            this.translate = translateOptions.getService();
-            
-            log.info("Google Cloud services initialized successfully for project: {}", projectId);
-            
+                .build()
+                .getService();
+
+            this.initialized = true;
+            log.info("Google Cloud services initialized successfully");
+
         } catch (Exception e) {
             log.error("Failed to initialize Google Cloud services", e);
-            throw new RuntimeException("Google Cloud initialization failed", e);
+            this.initialized = false;
         }
     }
-    
-    public String speechToText(byte[] audioData, String languageCode) {
-        if (speechClient == null) {
-            log.error("Speech client is not initialized");
-            return "";
-        }
-        
-        try {
-            RecognitionConfig config = RecognitionConfig.newBuilder()
-                .setEncoding(RecognitionConfig.AudioEncoding.MULAW)
-                .setSampleRateHertz(8000)
-                .setLanguageCode(languageCode)
-                .setEnableAutomaticPunctuation(true)
-                .build();
-            
-            RecognitionAudio audio = RecognitionAudio.newBuilder()
-                .setContent(ByteString.copyFrom(audioData))
-                .build();
-            
-            RecognizeResponse response = speechClient.recognize(config, audio);
-            
-            String transcript = response.getResultsList().stream()
-                .map(result -> result.getAlternativesList().get(0).getTranscript())
-                .collect(Collectors.joining(" "));
-                
-            log.debug("Speech-to-text result: {}", transcript);
-            return transcript;
-                
-        } catch (Exception e) {
-            log.error("Speech-to-text conversion failed", e);
-            return "";
-        }
-    }
-    
-    public String translateText(String text, String targetLanguage, String sourceLanguage) {
-        if (translate == null) {
-            log.error("Translate client is not initialized");
-            return text;
-        }
-        
-        if (text == null || text.trim().isEmpty()) {
-            return text;
-        }
-        
-        try {
-            Translation translation = translate.translate(
-                text,
-                Translate.TranslateOption.sourceLanguage(sourceLanguage),
-                Translate.TranslateOption.targetLanguage(targetLanguage)
-            );
-            
-            String translatedText = translation.getTranslatedText();
-            log.debug("Translation result: {} -> {}", text, translatedText);
-            return translatedText;
-            
-        } catch (Exception e) {
-            log.error("Text translation failed for text: '{}' from {} to {}", text, sourceLanguage, targetLanguage, e);
-            return text; // Return original text if translation fails
-        }
-    }
-    
-    public byte[] textToSpeech(String text, String languageCode) {
-        if (textToSpeechClient == null) {
-            log.error("Text-to-speech client is not initialized");
-            return new byte[0];
-        }
-        
-        if (text == null || text.trim().isEmpty()) {
-            return new byte[0];
-        }
-        
-        try {
-            SynthesisInput input = SynthesisInput.newBuilder().setText(text).build();
-            
-            VoiceSelectionParams voice = VoiceSelectionParams.newBuilder()
-                .setLanguageCode(languageCode)
-                .setSsmlGender(SsmlVoiceGender.NEUTRAL)
-                .build();
-            
-            AudioConfig audioConfig = AudioConfig.newBuilder()
-                .setAudioEncoding(AudioEncoding.MULAW)
-                .setSampleRateHertz(8000)
-                .build();
-            
-            SynthesizeSpeechResponse response = textToSpeechClient.synthesizeSpeech(
-                input, voice, audioConfig
-            );
-            
-            byte[] audioContent = response.getAudioContent().toByteArray();
-            log.debug("Text-to-speech generated {} bytes for text: {}", audioContent.length, text);
-            return audioContent;
-            
-        } catch (Exception e) {
-            log.error("Text-to-speech conversion failed for text: '{}' in language: {}", text, languageCode, e);
-            return new byte[0];
-        }
-    }
-    
-    public boolean isInitialized() {
-        return speechClient != null && textToSpeechClient != null && translate != null;
-    }
-    
-    public String getProjectId() {
-        return projectId;
-    }
-    
-    // Language code utilities
-    public String normalizeLanguageCode(String languageCode) {
-        if (languageCode == null) {
-            return "en-US";
-        }
-        
-        // Convert common language codes to Google Cloud format
-        switch (languageCode.toLowerCase()) {
-            case "en":
-            case "english":
-                return "en-US";
-            case "es":
-            case "spanish":
-                return "es-ES";
-            case "fr":
-            case "french":
-                return "fr-FR";
-            case "de":
-            case "german":
-                return "de-DE";
-            case "it":
-            case "italian":
-                return "it-IT";
-            case "ja":
-            case "japanese":
-                return "ja-JP";
-            case "ko":
-            case "korean":
-                return "ko-KR";
-            case "zh":
-            case "chinese":
-                return "zh-CN";
-            default:
-                return languageCode;
-        }
-    }
-    
-    // Extract language code for translation (remove region)
-    public String getTranslateLanguageCode(String fullLanguageCode) {
-        if (fullLanguageCode == null) {
-            return "en";
-        }
-        
-        String[] parts = fullLanguageCode.split("-");
-        return parts[0].toLowerCase();
-    }
-    
-    // Get default voice name for language
-    public String getDefaultVoiceName(String languageCode) {
-        if (languageCode == null) {
-            return "en-US-Standard-A";
-        }
-        
-        // Map common language codes to default voices
-        switch (languageCode.toLowerCase()) {
-            case "en-us":
-                return "en-US-Standard-A";
-            case "es-es":
-                return "es-ES-Standard-A";
-            case "fr-fr":
-                return "fr-FR-Standard-A";
-            case "de-de":
-                return "de-DE-Standard-A";
-            case "it-it":
-                return "it-IT-Standard-A";
-            case "ja-jp":
-                return "ja-JP-Standard-A";
-            case "ko-kr":
-                return "ko-KR-Standard-A";
-            case "zh-cn":
-                return "cmn-CN-Standard-A";
-            default:
-                return "en-US-Standard-A";
-        }
-    }
-    
-    // Create speech stream for real-time processing (placeholder for streaming implementation)
-    public Object createSpeechStream(String languageCode) {
-        // This would be used for streaming speech recognition
-        // For now, return null as streaming is not implemented in this basic version
-        log.warn("createSpeechStream called but streaming not implemented. Using batch processing instead.");
-        return null;
-    }
-    
+
     @PreDestroy
     public void cleanup() {
         try {
             if (speechClient != null) {
                 speechClient.close();
-                log.info("Speech client closed");
             }
             if (textToSpeechClient != null) {
                 textToSpeechClient.close();
-                log.info("Text-to-speech client closed");
             }
-            log.info("Google Cloud services cleanup completed");
+            log.info("Google Cloud services cleaned up");
         } catch (Exception e) {
-            log.error("Error closing Google Cloud clients", e);
+            log.error("Error during cleanup", e);
         }
+    }
+
+    public boolean isInitialized() {
+        return initialized;
+    }
+
+    public CompletableFuture<String> transcribeAudio(byte[] audioData, String languageCode) {
+        return CompletableFuture.supplyAsync(() -> {
+            try {
+                if (!initialized || speechClient == null) {
+                    log.error("Speech client not initialized");
+                    return "";
+                }
+
+                // Normalize language code for Google Cloud
+                String normalizedLanguageCode = normalizeLanguageCode(languageCode);
+
+                RecognitionConfig config = RecognitionConfig.newBuilder()
+                    .setEncoding(RecognitionConfig.AudioEncoding.MULAW)
+                    .setSampleRateHertz(8000)
+                    .setLanguageCode(normalizedLanguageCode)
+                    .setEnableAutomaticPunctuation(true)
+                    .build();
+
+                RecognitionAudio audio = RecognitionAudio.newBuilder()
+                    .setContent(ByteString.copyFrom(audioData))
+                    .build();
+
+                RecognizeResponse response = speechClient.recognize(config, audio);
+                List<SpeechRecognitionResult> results = response.getResultsList();
+
+                if (!results.isEmpty()) {
+                    String transcript = results.get(0).getAlternatives(0).getTranscript();
+                    log.debug("Transcribed: {}", transcript);
+                    return transcript;
+                }
+
+                return "";
+
+            } catch (Exception e) {
+                log.error("Error transcribing audio", e);
+                return "";
+            }
+        });
+    }
+
+    public CompletableFuture<String> translateText(String text, String sourceLanguage, String targetLanguage) {
+        return CompletableFuture.supplyAsync(() -> {
+            try {
+                if (!initialized || translateService == null) {
+                    log.error("Translation service not initialized");
+                    return text; // Return original text as fallback
+                }
+
+                if (text == null || text.trim().isEmpty()) {
+                    return text;
+                }
+
+                // Normalize language codes
+                String normalizedSource = normalizeLanguageCodeForTranslation(sourceLanguage);
+                String normalizedTarget = normalizeLanguageCodeForTranslation(targetLanguage);
+
+                // Skip translation if source and target are the same
+                if (normalizedSource.equals(normalizedTarget)) {
+                    return text;
+                }
+
+                Translation translation = translateService.translate(
+                    text,
+                    Translate.TranslateOption.sourceLanguage(normalizedSource),
+                    Translate.TranslateOption.targetLanguage(normalizedTarget)
+                );
+
+                String translatedText = translation.getTranslatedText();
+                log.debug("Translated '{}' from {} to {}: '{}'", text, normalizedSource, normalizedTarget, translatedText);
+                return translatedText;
+
+            } catch (Exception e) {
+                log.error("Error translating text: " + text, e);
+                return text; // Return original text as fallback
+            }
+        });
+    }
+
+    public CompletableFuture<byte[]> synthesizeSpeech(String text, String languageCode) {
+        return CompletableFuture.supplyAsync(() -> {
+            try {
+                if (!initialized || textToSpeechClient == null) {
+                    log.error("Text-to-Speech client not initialized");
+                    return new byte[0];
+                }
+
+                if (text == null || text.trim().isEmpty()) {
+                    return new byte[0];
+                }
+
+                // Normalize language code
+                String normalizedLanguageCode = normalizeLanguageCode(languageCode);
+
+                SynthesisInput input = SynthesisInput.newBuilder()
+                    .setText(text)
+                    .build();
+
+                VoiceSelectionParams voice = VoiceSelectionParams.newBuilder()
+                    .setLanguageCode(normalizedLanguageCode)
+                    .setSsmlGender(SsmlVoiceGender.NEUTRAL)
+                    .build();
+
+                AudioConfig audioConfig = AudioConfig.newBuilder()
+                    .setAudioEncoding(AudioEncoding.MULAW)
+                    .setSampleRateHertz(8000)
+                    .build();
+
+                SynthesizeSpeechResponse response = textToSpeechClient.synthesizeSpeech(input, voice, audioConfig);
+                byte[] audioData = response.getAudioContent().toByteArray();
+
+                log.debug("Synthesized speech for text: '{}' in language: {}", text, normalizedLanguageCode);
+                return audioData;
+
+            } catch (Exception e) {
+                log.error("Error synthesizing speech for text: " + text, e);
+                return new byte[0];
+            }
+        });
+    }
+
+    // Process audio chunk for real-time translation
+    public void processAudioChunk(byte[] audioData, String sourceLanguage, String targetLanguage, 
+                                  AudioChunkCallback callback) {
+        if (!initialized) {
+            log.warn("Google Cloud services not initialized, skipping audio processing");
+            return;
+        }
+
+        transcribeAudio(audioData, sourceLanguage)
+            .thenCompose(transcript -> {
+                if (transcript.isEmpty()) {
+                    return CompletableFuture.completedFuture("");
+                }
+                return translateText(transcript, sourceLanguage, targetLanguage);
+            })
+            .thenCompose(translatedText -> {
+                if (translatedText.isEmpty()) {
+                    return CompletableFuture.completedFuture(new byte[0]);
+                }
+                return synthesizeSpeech(translatedText, targetLanguage);
+            })
+            .thenAccept(audioOutput -> {
+                if (audioOutput.length > 0) {
+                    callback.onAudioProcessed(audioOutput);
+                }
+            })
+            .exceptionally(throwable -> {
+                log.error("Error processing audio chunk", throwable);
+                return null;
+            });
+    }
+
+    // Normalize language codes for Google Cloud Speech/TTS
+    private String normalizeLanguageCode(String languageCode) {
+        if (languageCode == null) return "en-US";
+        
+        switch (languageCode.toLowerCase()) {
+            case "en": case "english": return "en-US";
+            case "es": case "spanish": return "es-ES";
+            case "fr": case "french": return "fr-FR";
+            case "de": case "german": return "de-DE";
+            case "it": case "italian": return "it-IT";
+            case "ja": case "japanese": return "ja-JP";
+            case "ko": case "korean": return "ko-KR";
+            case "zh": case "chinese": case "mandarin": return "zh-CN";
+            default: return languageCode;
+        }
+    }
+
+    // Normalize language codes for Google Cloud Translation
+    private String normalizeLanguageCodeForTranslation(String languageCode) {
+        if (languageCode == null) return "en";
+        
+        switch (languageCode.toLowerCase()) {
+            case "en-us": case "english": return "en";
+            case "es-es": case "spanish": return "es";
+            case "fr-fr": case "french": return "fr";
+            case "de-de": case "german": return "de";
+            case "it-it": case "italian": return "it";
+            case "ja-jp": case "japanese": return "ja";
+            case "ko-kr": case "korean": return "ko";
+            case "zh-cn": case "chinese": case "mandarin": return "zh";
+            default: 
+                // Extract language part if it's in format "xx-XX"
+                if (languageCode.contains("-")) {
+                    return languageCode.split("-")[0].toLowerCase();
+                }
+                return languageCode.toLowerCase();
+        }
+    }
+
+    public interface AudioChunkCallback {
+        void onAudioProcessed(byte[] audioData);
     }
 }
