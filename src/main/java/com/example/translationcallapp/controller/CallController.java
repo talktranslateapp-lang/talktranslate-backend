@@ -19,7 +19,7 @@ import java.util.*;
 
 @RestController
 @RequestMapping("/api/call")
-@CrossOrigin(origins = "*")
+@CrossOrigin(origins = {"*"}, methods = {RequestMethod.GET, RequestMethod.POST, RequestMethod.OPTIONS}, allowedHeaders = "*")
 public class CallController {
 
     private static final Logger logger = LoggerFactory.getLogger(CallController.class);
@@ -52,7 +52,7 @@ public class CallController {
         }
     }
 
-    @GetMapping("/token")
+    @GetMapping(value = "/token", produces = MediaType.APPLICATION_JSON_VALUE)
     public ResponseEntity<?> generateToken(@RequestParam(required = false) String identity) {
         try {
             if (identity == null || identity.trim().isEmpty()) {
