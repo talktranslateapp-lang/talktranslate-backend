@@ -87,6 +87,125 @@ public class CallController {
         }
     }
 
+    @PostMapping("/initiate-call")
+    public ResponseEntity<?> initiateTranslationCall(@RequestBody Map<String, String> request) {
+        try {
+            String callerIdentity = request.get("callerIdentity");
+            String targetNumber = request.get("targetNumber");
+            String sourceLanguage = request.get("sourceLanguage");
+            String targetLanguage = request.get("targetLanguage");
+            
+            if (targetNumber == null || targetNumber.trim().isEmpty()) {
+                Map<String, String> errorResponse = new HashMap<>();
+                errorResponse.put("error", "Target number is required");
+                return ResponseEntity.badRequest().body(errorResponse);
+            }
+            
+            logger.info("Initiating translation call - Caller: {}, Target: {}, Languages: {} -> {}", 
+                callerIdentity, targetNumber, sourceLanguage, targetLanguage);
+            
+            // Create unique conference name
+            String conferenceName = "translation-" + System.currentTimeMillis();
+            
+            // Use Twilio REST API to create call to target number
+            com.twilio.rest.api.v2010.account.Call call = com.twilio.rest.api.v2010.account.Call.creator(
+                new PhoneNumber(targetNumber),
+                new PhoneNumber(twilioPhoneNumber),
+                URI.create("https://talktranslate-backend-production.up.railway.app/api/call/connect-target")
+            )
+            .setMachineDetection("Enable")
+            .setStatusCallback(URI.create("https://talktranslate-backend-production.up.railway.app/api/call/voice/status"))
+            .setStatusCallbackEvent(Arrays.asList("initiated", "ringing", "answered", "completed"))
+            // Pass conference name and language info as URL parameters
+            .setUrl(URI.create("https://talktranslate-backend-production.up.railway.app/api/call/connect-target?conference=" + conferenceName + "&sourceLanguage=" + sourceLanguage + "&targetLanguage=" + targetLanguage))
+            .create();
+            
+            logger.info("Created outbound call to target: {}, CallSid: {}", targetNumber, call.getSid());
+            
+            // Return conference name to frontend so browser caller can join
+            Map<String, String> response = new HashMap<>();
+            response.put("conferenceName", conferenceName);
+            response.put("callSid", call.getSid());
+            response.put("status", "initiated");
+            
+            return ResponseEntity.ok(response);
+            
+        } catch (Exception e) {
+            logger.error("Failed to initiate translation call", e);
+            Map<String, String> errorResponse = new HashMap<>();
+            errorResponse.put("error", "Failed to initiate call: " + e.getMessage());
+            return ResponseEntity.status(HttpStatus.INTERNAL_SERVER_ERROR).body(errorResponse);
+        }
+    }
+
+    @PostMapping(value = "/connect-target", produces = MediaType.APPLICATION_XML_VALUE)
+    public ResponseEntity<String> connectTargetToConference(@RequestParam Map<String, String> params) {
+        try {
+            String conferenceName = params.get("conference");
+            String sourceLanguage = params.get("sourceLanguage");
+            String targetLanguage = params.get("targetLanguage");
+            String callSid = params.get("CallSid");
+            
+            logger.info("Connecting target to conference: {}, CallSid: {}", conferenceName, callSid);
+            
+            // Create TwiML to connect target to conference
+            VoiceResponse response = new VoiceResponse.Builder()
+                .say(new Say.Builder("You have an incoming translation call. Connecting now.").build())
+                .dial(new Dial.Builder()
+                    .conference(new Conference.Builder(conferenceName)
+                        .startConferenceOnEnter(true)
+                        .endConferenceOnExit(true)
+                        // Enable recording for translation processing
+                        .record("record-from-start")
+                        .build())
+                    .build())
+                .build();
+
+            return ResponseEntity.ok(response.toXml());
+            
+        } catch (Exception e) {
+            logger.error("Error connecting target to conference", e);
+            
+            VoiceResponse errorResponse = new VoiceResponse.Builder()
+                .say(new Say.Builder("Sorry, there was an error connecting your call.").build())
+                .build();
+                
+            return ResponseEntity.ok(errorResponse.toXml());
+        }
+    }
+
+    @PostMapping(value = "/connect-caller", produces = MediaType.APPLICATION_XML_VALUE)
+    public ResponseEntity<String> connectCallerToConference(@RequestParam Map<String, String> params) {
+        try {
+            String conferenceName = params.get("conference");
+            String callSid = params.get("CallSid");
+            
+            logger.info("Connecting browser caller to conference: {}, CallSid: {}", conferenceName, callSid);
+            
+            VoiceResponse response = new VoiceResponse.Builder()
+                .say(new Say.Builder("Welcome to the translation service. You are now connected.").build())
+                .dial(new Dial.Builder()
+                    .conference(new Conference.Builder(conferenceName)
+                        .startConferenceOnEnter(false)  // Don't start until both parties join
+                        .endConferenceOnExit(true)
+                        .record("record-from-start")
+                        .build())
+                    .build())
+                .build();
+
+            return ResponseEntity.ok(response.toXml());
+            
+        } catch (Exception e) {
+            logger.error("Error connecting caller to conference", e);
+            
+            VoiceResponse errorResponse = new VoiceResponse.Builder()
+                .say(new Say.Builder("Sorry, there was an error connecting your call.").build())
+                .build();
+                
+            return ResponseEntity.ok(errorResponse.toXml());
+        }
+    }
+
     @PostMapping(value = "/voice/incoming", produces = MediaType.APPLICATION_XML_VALUE)
     public ResponseEntity<String> handleIncomingCall(
             @RequestParam Map<String, String> params) {
