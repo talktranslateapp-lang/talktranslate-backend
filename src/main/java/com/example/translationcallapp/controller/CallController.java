@@ -54,20 +54,19 @@ public class CallController {
     public ResponseEntity<Map<String, String>> generateToken(
             @RequestParam(defaultValue = "anonymous") String identity) {
         try {
-            // Create access token
-            AccessToken accessToken = new AccessToken.Builder(
-                    accountSid,
-                    apiKeySid,
-                    apiKeySecret
-            ).identity(identity).build();
-
             // Create Voice grant
             VoiceGrant voiceGrant = new VoiceGrant();
             voiceGrant.setOutgoingApplicationSid(twimlAppSid);
             voiceGrant.setIncomingAllow(true);
 
-            // Add grant to token
-            accessToken.addGrant(voiceGrant);
+            // Create access token with grant
+            AccessToken accessToken = new AccessToken.Builder(
+                    accountSid,
+                    apiKeySid,
+                    apiKeySecret
+            ).identity(identity)
+             .grant(voiceGrant)
+             .build();
 
             Map<String, String> response = new HashMap<>();
             response.put("identity", identity);
