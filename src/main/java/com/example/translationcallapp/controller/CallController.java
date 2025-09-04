@@ -4,23 +4,18 @@ import com.example.translationcallapp.service.GoogleCloudService;
 import com.twilio.jwt.accesstoken.AccessToken;
 import com.twilio.jwt.accesstoken.VoiceGrant;
 import com.twilio.rest.api.v2010.account.Call;
-import com.twilio.rest.api.v2010.account.conference.Participant;
 import com.twilio.twiml.VoiceResponse;
-import com.twilio.twiml.voice.Conference;
 import com.twilio.twiml.voice.Dial;
 import com.twilio.twiml.voice.Say;
 import com.twilio.type.PhoneNumber;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.beans.factory.annotation.Value;
-import org.springframework.http.MediaType;
 import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.*;
 
-import javax.servlet.http.HttpServletRequest;
 import java.net.URI;
 import java.util.HashMap;
-import java.util.List;
 import java.util.Map;
 
 @Slf4j
@@ -36,15 +31,15 @@ public class CallController {
     private String accountSid;
 
     @Value("${twilio.api.key}")
-    private String apiKeySid;
+    private String apiKey;
 
     @Value("${twilio.api.secret}")
-    private String apiKeySecret;
+    private String apiSecret;
 
     @Value("${twilio.twiml.app.sid}")
     private String twimlAppSid;
 
-    @Value("${twilio.phone.number}")
+    @Value("${twilio.phone.number:+1234567890}")
     private String twilioPhoneNumber;
 
     public CallController() {
@@ -52,276 +47,225 @@ public class CallController {
     }
 
     @GetMapping("/token")
-    public ResponseEntity<Map<String, String>> generateToken(
-            @RequestParam(defaultValue = "anonymous") String identity) {
+    public ResponseEntity<Map<String, String>> generateToken(@RequestParam String identity) {
         try {
-            // Create Voice grant
+            log.info("Generating token for identity: {}", identity);
+            
             VoiceGrant voiceGrant = new VoiceGrant();
-            voiceGrant.setOutgoingApplicationSid(twimlAppSid);
             voiceGrant.setIncomingAllow(true);
+            voiceGrant.setOutgoingApplicationSid(twimlAppSid);
 
-            // Create access token with grant
-            AccessToken accessToken = new AccessToken.Builder(
-                    accountSid,
-                    apiKeySid,
-                    apiKeySecret
-            ).identity(identity)
-             .grant(voiceGrant)
-             .build();
+            AccessToken accessToken = new AccessToken.Builder(accountSid, apiKey, apiSecret)
+                    .identity(identity)
+                    .grant(voiceGrant)
+                    .build();
 
             Map<String, String> response = new HashMap<>();
-            response.put("identity", identity);
             response.put("token", accessToken.toJwt());
+            response.put("identity", identity);
 
-            return ResponseEntity.ok()
-                    .contentType(MediaType.APPLICATION_JSON)
-                    .body(response);
+            return ResponseEntity.ok(response);
+
         } catch (Exception e) {
-            log.error("Error generating token", e);
+            log.error("Failed to generate token", e);
             Map<String, String> errorResponse = new HashMap<>();
             errorResponse.put("error", "Failed to generate token: " + e.getMessage());
             return ResponseEntity.internalServerError().body(errorResponse);
         }
     }
 
-    @PostMapping("/initiate-call")
-    public ResponseEntity<Map<String, String>> initiateCall(@RequestBody Map<String, String> request) {
+    /**
+     * Main webhook handler - receives calls from TwiML App
+     * This method will receive all the parameters passed from device.connect()
+     */
+    @PostMapping("/voice/incoming")
+    public ResponseEntity<String> handleIncomingCall(@RequestParam Map<String, String> allParams) {
         try {
-            String targetPhoneNumber = request.get("targetPhoneNumber");
-            String sourceLanguage = request.get("sourceLanguage");
-            String targetLanguage = request.get("targetLanguage");
+            // Log all parameters received from Twilio (as per their guidance)
+            log.info("=== INCOMING CALL WEBHOOK ===");
+            log.info("All parameters received: {}", allParams);
             
-            log.info("Initiating call to {} with translation from {} to {}", 
-                    targetPhoneNumber, sourceLanguage, targetLanguage);
-
-            // Generate unique conference name
-            String conferenceName = "translation-call-" + System.currentTimeMillis();
+            // Standard Twilio parameters
+            String from = allParams.get("From");
+            String to = allParams.get("To");
+            String callSid = allParams.get("CallSid");
+            String accountSid = allParams.get("AccountSid");
             
-            // Create outbound call to target phone number
-            String webhookUrl = "https://talktranslate-backend-production.up.railway.app/api/call/connect-target";
+            // Custom parameters sent from device.connect() (per Twilio's guidance)
+            String targetPhoneNumber = allParams.get("targetPhoneNumber");
+            String conferenceName = allParams.get("conferenceName");
+            String sourceLanguage = allParams.get("sourceLanguage");
+            String targetLanguage = allParams.get("targetLanguage");
+            String callType = allParams.get("callType");
             
-            Call call = Call.creator(
-                    new PhoneNumber(targetPhoneNumber), // to
-                    new PhoneNumber(twilioPhoneNumber),  // from
-                    URI.create(webhookUrl + "?conferenceName=" + conferenceName + 
-                              "&sourceLanguage=" + sourceLanguage + 
-                              "&targetLanguage=" + targetLanguage)
-            ).create();
+            log.info("Standard params - From: {}, To: {}, CallSid: {}", from, to, callSid);
+            log.info("Custom params - Target: {}, Conference: {}, Languages: {} -> {}", 
+                    targetPhoneNumber, conferenceName, sourceLanguage, targetLanguage);
 
-            log.info("Created outbound call: {}", call.getSid());
+            // Validate that we have the required parameters
+            if (targetPhoneNumber == null || conferenceName == null) {
+                log.error("Missing required parameters: targetPhoneNumber={}, conferenceName={}", 
+                         targetPhoneNumber, conferenceName);
+                
+                VoiceResponse errorResponse = new VoiceResponse.Builder()
+                    .say(new Say.Builder("Sorry, there was an error with the call parameters. Please try again.")
+                        .voice(Say.Voice.ALICE)
+                        .language(Say.Language.EN_US)
+                        .build())
+                    .build();
+                    
+                return ResponseEntity.ok()
+                    .header("Content-Type", "application/xml")
+                    .body(errorResponse.toXml());
+            }
 
-            Map<String, String> response = new HashMap<>();
-            response.put("conferenceName", conferenceName);
-            response.put("callSid", call.getSid());
-            response.put("status", "initiated");
+            // Step 1: Put the browser caller (from) into the conference
+            Say welcomeMessage = new Say.Builder("Welcome to the translation service. Connecting you to " + targetPhoneNumber + ". Please wait.")
+                    .voice(Say.Voice.ALICE)
+                    .language(Say.Language.EN_US)
+                    .build();
 
-            return ResponseEntity.ok(response);
+            // Create conference dial for the browser caller
+            com.twilio.twiml.voice.Conference conference = new com.twilio.twiml.voice.Conference.Builder(conferenceName)
+                    .record(com.twilio.twiml.voice.Conference.Record.RECORD_FROM_START)
+                    .statusCallbackEvent("start join leave end")
+                    .statusCallback("https://talktranslate-backend-production.up.railway.app/api/call/conference/status")
+                    .waitUrl("http://twimlets.com/holdmusic?Bucket=com.twilio.music.classical")
+                    .build();
+
+            Dial dial = new Dial.Builder()
+                    .conference(conference)
+                    .build();
+
+            // Step 2: Initiate outbound call to target phone number (this happens after TwiML response)
+            // We do this asynchronously so the browser caller gets connected to conference first
+            initiateOutboundCallAsync(targetPhoneNumber, conferenceName, targetLanguage);
+
+            // Return TwiML for browser caller
+            VoiceResponse voiceResponse = new VoiceResponse.Builder()
+                    .say(welcomeMessage)
+                    .dial(dial)
+                    .build();
+
+            log.info("Returning TwiML for browser caller to join conference: {}", conferenceName);
+            return ResponseEntity.ok()
+                    .header("Content-Type", "application/xml")
+                    .body(voiceResponse.toXml());
+
         } catch (Exception e) {
-            log.error("Error initiating call", e);
-            Map<String, String> errorResponse = new HashMap<>();
-            errorResponse.put("error", "Failed to initiate call: " + e.getMessage());
-            return ResponseEntity.internalServerError().body(errorResponse);
+            log.error("Failed to handle incoming call", e);
+            
+            VoiceResponse errorResponse = new VoiceResponse.Builder()
+                .say(new Say.Builder("Sorry, there was an error processing your call. Please try again.")
+                    .voice(Say.Voice.ALICE)
+                    .language(Say.Language.EN_US)
+                    .build())
+                .build();
+                
+            return ResponseEntity.ok()
+                .header("Content-Type", "application/xml")
+                .body(errorResponse.toXml());
         }
     }
 
-    @PostMapping(value = "/connect-target", produces = MediaType.APPLICATION_XML_VALUE)
-    public ResponseEntity<String> connectTarget(
+    /**
+     * Async method to call target phone number and connect them to conference
+     */
+    private void initiateOutboundCallAsync(String targetPhoneNumber, String conferenceName, String targetLanguage) {
+        // Run in separate thread to avoid blocking the TwiML response
+        new Thread(() -> {
+            try {
+                Thread.sleep(2000); // Give browser caller time to join conference first
+                
+                log.info("Initiating outbound call to: {} for conference: {}", targetPhoneNumber, conferenceName);
+                
+                // Create outbound call to target number that will connect them to the same conference
+                String webhookUrl = "https://talktranslate-backend-production.up.railway.app/api/call/connect-target" +
+                                  "?conferenceName=" + conferenceName + 
+                                  "&targetLanguage=" + (targetLanguage != null ? targetLanguage : "es-ES");
+                
+                Call call = Call.creator(
+                    new PhoneNumber(targetPhoneNumber),
+                    new PhoneNumber(twilioPhoneNumber), // Your Twilio number
+                    URI.create(webhookUrl)
+                ).create();
+
+                log.info("Successfully initiated outbound call: {} to join conference: {}", 
+                        call.getSid(), conferenceName);
+                
+            } catch (Exception e) {
+                log.error("Failed to initiate outbound call to: " + targetPhoneNumber, e);
+            }
+        }).start();
+    }
+
+    /**
+     * Webhook for connecting target phone number to conference
+     */
+    @PostMapping("/connect-target")
+    public ResponseEntity<String> connectTargetToConference(
             @RequestParam String conferenceName,
-            @RequestParam(required = false) String sourceLanguage,
-            @RequestParam(required = false) String targetLanguage) {
+            @RequestParam(defaultValue = "es-ES") String targetLanguage) {
         try {
-            log.info("Connecting target to conference: {}", conferenceName);
+            log.info("Connecting target phone to conference: {} with language: {}", conferenceName, targetLanguage);
 
-            VoiceResponse response = new VoiceResponse.Builder()
-                    .say(new Say.Builder("You are being connected to a translation call.")
-                            .voice(Say.Voice.ALICE)
-                            .build())
-                    .dial(new Dial.Builder()
-                            .conference(new Conference.Builder(conferenceName)
-                                    .startConferenceOnEnter(true)
-                                    .endConferenceOnExit(false)
-                                    .record(Conference.Record.RECORD_FROM_START)
-                                    .recordingStatusCallback("https://talktranslate-backend-production.up.railway.app/api/call/recording-status")
-                                    .build())
-                            .build())
+            Say welcomeMessage = new Say.Builder("Hello! You are receiving a translated call. You will be connected shortly.")
+                    .voice(Say.Voice.ALICE)
+                    .language(Say.Language.EN_US)
+                    .build();
+
+            com.twilio.twiml.voice.Conference conference = new com.twilio.twiml.voice.Conference.Builder(conferenceName)
+                    .record(com.twilio.twiml.voice.Conference.Record.RECORD_FROM_START)
+                    .statusCallbackEvent("start join leave end")
+                    .statusCallback("https://talktranslate-backend-production.up.railway.app/api/call/conference/status")
+                    .build();
+
+            Dial dial = new Dial.Builder()
+                    .conference(conference)
+                    .build();
+
+            VoiceResponse voiceResponse = new VoiceResponse.Builder()
+                    .say(welcomeMessage)
+                    .dial(dial)
                     .build();
 
             return ResponseEntity.ok()
-                    .contentType(MediaType.APPLICATION_XML)
-                    .body(response.toXml());
+                    .header("Content-Type", "application/xml")
+                    .body(voiceResponse.toXml());
+
         } catch (Exception e) {
-            log.error("Error connecting target to conference", e);
-            
-            VoiceResponse errorResponse = new VoiceResponse.Builder()
-                    .say(new Say.Builder("Sorry, there was an error connecting your call.")
-                            .voice(Say.Voice.ALICE)
-                            .build())
-                    .build();
-            
+            log.error("Failed to connect target to conference", e);
             return ResponseEntity.internalServerError()
-                    .contentType(MediaType.APPLICATION_XML)
-                    .body(errorResponse.toXml());
+                    .body("<Response><Say>Error connecting to conference</Say></Response>");
         }
     }
 
-    @PostMapping(value = "/connect-caller", produces = MediaType.APPLICATION_XML_VALUE)
-    public ResponseEntity<String> connectCaller(
-            @RequestParam(required = false) String conferenceName,
-            @RequestParam(required = false) String sourceLanguage,
-            @RequestParam(required = false) String targetLanguage,
-            HttpServletRequest request) {
-        try {
-            // Enhanced debugging - log all parameters
-            log.info("=== CONNECT CALLER DEBUG INFO ===");
-            log.info("Request Method: {}", request.getMethod());
-            log.info("Content Type: {}", request.getContentType());
-            log.info("Query String: {}", request.getQueryString());
-            
-            // Log all request parameters
-            Map<String, String[]> allParams = request.getParameterMap();
-            log.info("All request parameters: {}", allParams);
-            
-            for (Map.Entry<String, String[]> entry : allParams.entrySet()) {
-                log.info("Parameter '{}': {}", entry.getKey(), String.join(", ", entry.getValue()));
-            }
-            
-            // Try different ways to get the conference name
-            String finalConferenceName = conferenceName;
-            if (finalConferenceName == null || finalConferenceName.isEmpty()) {
-                finalConferenceName = request.getParameter("conferenceName");
-                log.info("Trying request.getParameter('conferenceName'): {}", finalConferenceName);
-            }
-            
-            // Try reading from form parameters if still null
-            if (finalConferenceName == null || finalConferenceName.isEmpty()) {
-                String[] confNameArray = allParams.get("conferenceName");
-                if (confNameArray != null && confNameArray.length > 0) {
-                    finalConferenceName = confNameArray[0];
-                    log.info("Found conferenceName in parameter map: {}", finalConferenceName);
-                }
-            }
-            
-            log.info("Final conferenceName: {}", finalConferenceName);
-            log.info("sourceLanguage: {}, targetLanguage: {}", sourceLanguage, targetLanguage);
-            log.info("===============================");
-
-            log.info("Connecting caller to conference: {}", finalConferenceName);
-
-            VoiceResponse response = new VoiceResponse.Builder()
-                    .say(new Say.Builder("Welcome to the translation service. Connecting you now.")
-                            .voice(Say.Voice.ALICE)
-                            .build())
-                    .dial(new Dial.Builder()
-                            .conference(new Conference.Builder(finalConferenceName != null ? finalConferenceName : "default-conference")
-                                    .startConferenceOnEnter(true)
-                                    .endConferenceOnExit(true)
-                                    .record(Conference.Record.RECORD_FROM_START)
-                                    .recordingStatusCallback("https://talktranslate-backend-production.up.railway.app/api/call/recording-status")
-                                    .build())
-                            .build())
-                    .build();
-
-            return ResponseEntity.ok()
-                    .contentType(MediaType.APPLICATION_XML)
-                    .body(response.toXml());
-        } catch (Exception e) {
-            log.error("Error connecting caller to conference", e);
-            
-            VoiceResponse errorResponse = new VoiceResponse.Builder()
-                    .say(new Say.Builder("Sorry, there was an error connecting your call.")
-                            .voice(Say.Voice.ALICE)
-                            .build())
-                    .build();
-            
-            return ResponseEntity.internalServerError()
-                    .contentType(MediaType.APPLICATION_XML)
-                    .body(errorResponse.toXml());
+    /**
+     * Conference status webhook - handles conference events
+     */
+    @PostMapping("/conference/status")
+    public ResponseEntity<String> handleConferenceStatus(@RequestParam Map<String, String> params) {
+        log.info("Conference status callback: {}", params);
+        
+        String event = params.get("StatusCallbackEvent");
+        String conferenceName = params.get("FriendlyName");
+        String participantSid = params.get("CallSid");
+        
+        switch (event) {
+            case "conference-start":
+                log.info("Conference started: {}", conferenceName);
+                break;
+            case "participant-join":
+                log.info("Participant joined conference {}: {}", conferenceName, participantSid);
+                break;
+            case "participant-leave":
+                log.info("Participant left conference {}: {}", conferenceName, participantSid);
+                break;
+            case "conference-end":
+                log.info("Conference ended: {}", conferenceName);
+                break;
         }
-    }
-
-    @PostMapping("/recording-status")
-    public ResponseEntity<String> recordingStatus(@RequestBody Map<String, String> request) {
-        try {
-            log.info("Recording status callback: {}", request);
-            return ResponseEntity.ok("OK");
-        } catch (Exception e) {
-            log.error("Error handling recording status", e);
-            return ResponseEntity.internalServerError().body("Error");
-        }
-    }
-
-    @PostMapping("/end-conference")
-    public ResponseEntity<Map<String, String>> endConference(@RequestBody Map<String, String> request) {
-        try {
-            String conferenceName = request.get("conferenceName");
-            log.info("Ending conference: {}", conferenceName);
-            
-            // You could add logic here to end the conference if needed
-            Map<String, String> response = new HashMap<>();
-            response.put("status", "conference ended");
-            return ResponseEntity.ok(response);
-        } catch (Exception e) {
-            log.error("Error ending conference", e);
-            return ResponseEntity.internalServerError().build();
-        }
-    }
-
-    @GetMapping("/conference/participants")
-    public ResponseEntity<Map<String, Object>> getConferenceParticipants(
-            @RequestParam String conferenceName) {
-        try {
-            // Get conference participants (this would need additional Twilio API calls)
-            Map<String, Object> response = new HashMap<>();
-            response.put("conferenceName", conferenceName);
-            response.put("participants", List.of()); // Placeholder
-            
-            return ResponseEntity.ok(response);
-        } catch (Exception e) {
-            log.error("Error getting conference participants", e);
-            return ResponseEntity.internalServerError().build();
-        }
-    }
-
-    // Legacy endpoint - kept for compatibility
-    @PostMapping(value = "/voice/incoming", produces = MediaType.APPLICATION_XML_VALUE)
-    public ResponseEntity<String> handleIncomingCall(
-            @RequestParam(required = false) String From,
-            @RequestParam(required = false) String To,
-            @RequestParam(required = false) String CallSid,
-            HttpServletRequest request) {
-        try {
-            log.info("Legacy incoming call - From: {}, To: {}, CallSid: {}", From, To, CallSid);
-            
-            // Log all parameters for debugging legacy calls too
-            log.info("Legacy call parameters: {}", request.getParameterMap());
-
-            VoiceResponse response = new VoiceResponse.Builder()
-                    .say(new Say.Builder("Welcome to the translation service.")
-                            .voice(Say.Voice.ALICE)
-                            .build())
-                    .dial(new Dial.Builder()
-                            .conference(new Conference.Builder("legacy-conference")
-                                    .startConferenceOnEnter(true)
-                                    .endConferenceOnExit(true)
-                                    .build())
-                            .build())
-                    .build();
-
-            return ResponseEntity.ok()
-                    .contentType(MediaType.APPLICATION_XML)
-                    .body(response.toXml());
-        } catch (Exception e) {
-            log.error("Error handling legacy incoming call", e);
-            
-            VoiceResponse errorResponse = new VoiceResponse.Builder()
-                    .say(new Say.Builder("Sorry, there was an error.")
-                            .voice(Say.Voice.ALICE)
-                            .build())
-                    .build();
-            
-            return ResponseEntity.internalServerError()
-                    .contentType(MediaType.APPLICATION_XML)
-                    .body(errorResponse.toXml());
-        }
+        
+        return ResponseEntity.ok("<Response></Response>");
     }
 }
