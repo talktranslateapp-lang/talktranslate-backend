@@ -17,6 +17,7 @@ import org.springframework.web.bind.annotation.*;
 import java.net.URI;
 import java.util.HashMap;
 import java.util.Map;
+import java.util.concurrent.ConcurrentHashMap;
 
 @Slf4j
 @RestController
@@ -41,6 +42,9 @@ public class CallController {
 
     @Value("${twilio.phone.number:+1234567890}")
     private String twilioPhoneNumber;
+
+    // In-memory storage for call data (use Redis or database in production)
+    private final Map<String, Map<String, String>> callDataStorage = new ConcurrentHashMap<>();
 
     public CallController() {
         log.info("Twilio initialized successfully");
@@ -74,14 +78,55 @@ public class CallController {
         }
     }
 
+    @PostMapping("/store-call-data")
+    public ResponseEntity<Map<String, String>> storeCallData(@RequestBody Map<String, String> callData) {
+        try {
+            String callId = callData.get("callId");
+            log.info("Storing call data for callId {}: {}", callId, callData);
+            
+            // Add timestamp for cleanup
+            callData.put("storedAt", String.valueOf(System.currentTimeMillis()));
+            callDataStorage.put(callId, callData);
+            
+            // Clean up old entries (older than 10 minutes)
+            cleanupOldCallData();
+            
+            Map<String, String> response = new HashMap<>();
+            response.put("status", "success");
+            response.put("callId", callId);
+            
+            return ResponseEntity.ok(response);
+        } catch (Exception e) {
+            log.error("Failed to store call data", e);
+            Map<String, String> errorResponse = new HashMap<>();
+            errorResponse.put("error", e.getMessage());
+            return ResponseEntity.internalServerError().body(errorResponse);
+        }
+    }
+
+    /**
+     * Clean up call data older than 10 minutes to prevent memory leaks
+     */
+    private void cleanupOldCallData() {
+        long tenMinutesAgo = System.currentTimeMillis() - (10 * 60 * 1000);
+        
+        callDataStorage.entrySet().removeIf(entry -> {
+            String storedAtStr = entry.getValue().get("storedAt");
+            if (storedAtStr != null) {
+                long storedAt = Long.parseLong(storedAtStr);
+                return storedAt < tenMinutesAgo;
+            }
+            return true; // Remove entries without timestamp
+        });
+    }
+
     /**
      * Main webhook handler - receives calls from TwiML App
-     * This method will receive all the parameters passed from device.connect()
+     * Now retrieves call data from storage since device.connect() params don't reach webhook
      */
     @PostMapping("/voice/incoming")
     public ResponseEntity<String> handleIncomingCall(@RequestParam Map<String, String> allParams) {
         try {
-            // Log all parameters received from Twilio (as per their guidance)
             log.info("=== INCOMING CALL WEBHOOK ===");
             log.info("All parameters received: {}", allParams);
             
@@ -91,24 +136,17 @@ public class CallController {
             String callSid = allParams.get("CallSid");
             String accountSid = allParams.get("AccountSid");
             
-            // Custom parameters sent from device.connect() (per Twilio's guidance)
-            String targetPhoneNumber = allParams.get("targetPhoneNumber");
-            String conferenceName = allParams.get("conferenceName");
-            String sourceLanguage = allParams.get("sourceLanguage");
-            String targetLanguage = allParams.get("targetLanguage");
-            String callType = allParams.get("callType");
-            
             log.info("Standard params - From: {}, To: {}, CallSid: {}", from, to, callSid);
-            log.info("Custom params - Target: {}, Conference: {}, Languages: {} -> {}", 
-                    targetPhoneNumber, conferenceName, sourceLanguage, targetLanguage);
 
-            // Validate that we have the required parameters
-            if (targetPhoneNumber == null || conferenceName == null) {
-                log.error("Missing required parameters: targetPhoneNumber={}, conferenceName={}", 
-                         targetPhoneNumber, conferenceName);
+            // Since Twilio Client SDK doesn't pass custom params to webhook,
+            // we need to find the most recent call data entry
+            Map<String, String> callData = findMostRecentCallData();
+            
+            if (callData == null) {
+                log.error("No recent call data found for incoming call from: {}", from);
                 
                 VoiceResponse errorResponse = new VoiceResponse.Builder()
-                    .say(new Say.Builder("Sorry, there was an error with the call parameters. Please try again.")
+                    .say(new Say.Builder("Sorry, there was an error with the call setup. Please try again.")
                         .voice(Say.Voice.ALICE)
                         .language(Say.Language.EN_US)
                         .build())
@@ -119,13 +157,21 @@ public class CallController {
                     .body(errorResponse.toXml());
             }
 
+            String targetPhoneNumber = callData.get("targetPhoneNumber");
+            String conferenceName = callData.get("callId");
+            String sourceLanguage = callData.get("sourceLanguage");
+            String targetLanguage = callData.get("targetLanguage");
+            
+            log.info("Retrieved call data - Target: {}, Conference: {}, Languages: {} -> {}", 
+                    targetPhoneNumber, conferenceName, sourceLanguage, targetLanguage);
+
             // Step 1: Put the browser caller (from) into the conference
             Say welcomeMessage = new Say.Builder("Welcome to the translation service. Connecting you to " + targetPhoneNumber + ". Please wait.")
                     .voice(Say.Voice.ALICE)
                     .language(Say.Language.EN_US)
                     .build();
 
-            // Create conference dial for the browser caller (FIXED: removed invalid methods)
+            // Create conference dial for the browser caller
             com.twilio.twiml.voice.Conference conference = new com.twilio.twiml.voice.Conference.Builder(conferenceName)
                     .record(com.twilio.twiml.voice.Conference.Record.RECORD_FROM_START)
                     .statusCallback("https://talktranslate-backend-production.up.railway.app/api/call/conference/status")
@@ -165,6 +211,35 @@ public class CallController {
                 .header("Content-Type", "application/xml")
                 .body(errorResponse.toXml());
         }
+    }
+
+    /**
+     * Find the most recent call data entry (within last 2 minutes)
+     */
+    private Map<String, String> findMostRecentCallData() {
+        long twoMinutesAgo = System.currentTimeMillis() - (2 * 60 * 1000);
+        Map<String, String> mostRecentCallData = null;
+        long mostRecentTimestamp = 0;
+        
+        for (Map<String, String> callData : callDataStorage.values()) {
+            String timestampStr = callData.get("timestamp");
+            if (timestampStr != null) {
+                long timestamp = Long.parseLong(timestampStr);
+                if (timestamp > twoMinutesAgo && timestamp > mostRecentTimestamp) {
+                    mostRecentCallData = callData;
+                    mostRecentTimestamp = timestamp;
+                }
+            }
+        }
+        
+        if (mostRecentCallData != null) {
+            // Remove the used call data to prevent reuse
+            String callId = mostRecentCallData.get("callId");
+            callDataStorage.remove(callId);
+            log.info("Retrieved and removed call data for callId: {}", callId);
+        }
+        
+        return mostRecentCallData;
     }
 
     /**
@@ -213,7 +288,6 @@ public class CallController {
                     .language(Say.Language.EN_US)
                     .build();
 
-            // FIXED: removed invalid statusCallbackEvent method
             com.twilio.twiml.voice.Conference conference = new com.twilio.twiml.voice.Conference.Builder(conferenceName)
                     .record(com.twilio.twiml.voice.Conference.Record.RECORD_FROM_START)
                     .statusCallback("https://talktranslate-backend-production.up.railway.app/api/call/conference/status")
@@ -270,5 +344,16 @@ public class CallController {
         }
         
         return ResponseEntity.ok("<Response></Response>");
+    }
+
+    /**
+     * Debug endpoint to check stored call data
+     */
+    @GetMapping("/debug/call-data")
+    public ResponseEntity<Map<String, Object>> debugCallData() {
+        Map<String, Object> debug = new HashMap<>();
+        debug.put("totalEntries", callDataStorage.size());
+        debug.put("entries", callDataStorage);
+        return ResponseEntity.ok(debug);
     }
 }
