@@ -17,6 +17,7 @@ import org.springframework.http.MediaType;
 import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.*;
 
+import javax.servlet.http.HttpServletRequest;
 import java.net.URI;
 import java.util.HashMap;
 import java.util.List;
@@ -167,16 +168,51 @@ public class CallController {
     public ResponseEntity<String> connectCaller(
             @RequestParam(required = false) String conferenceName,
             @RequestParam(required = false) String sourceLanguage,
-            @RequestParam(required = false) String targetLanguage) {
+            @RequestParam(required = false) String targetLanguage,
+            HttpServletRequest request) {
         try {
-            log.info("Connecting caller to conference: {}", conferenceName);
+            // Enhanced debugging - log all parameters
+            log.info("=== CONNECT CALLER DEBUG INFO ===");
+            log.info("Request Method: {}", request.getMethod());
+            log.info("Content Type: {}", request.getContentType());
+            log.info("Query String: {}", request.getQueryString());
+            
+            // Log all request parameters
+            Map<String, String[]> allParams = request.getParameterMap();
+            log.info("All request parameters: {}", allParams);
+            
+            for (Map.Entry<String, String[]> entry : allParams.entrySet()) {
+                log.info("Parameter '{}': {}", entry.getKey(), String.join(", ", entry.getValue()));
+            }
+            
+            // Try different ways to get the conference name
+            String finalConferenceName = conferenceName;
+            if (finalConferenceName == null || finalConferenceName.isEmpty()) {
+                finalConferenceName = request.getParameter("conferenceName");
+                log.info("Trying request.getParameter('conferenceName'): {}", finalConferenceName);
+            }
+            
+            // Try reading from form parameters if still null
+            if (finalConferenceName == null || finalConferenceName.isEmpty()) {
+                String[] confNameArray = allParams.get("conferenceName");
+                if (confNameArray != null && confNameArray.length > 0) {
+                    finalConferenceName = confNameArray[0];
+                    log.info("Found conferenceName in parameter map: {}", finalConferenceName);
+                }
+            }
+            
+            log.info("Final conferenceName: {}", finalConferenceName);
+            log.info("sourceLanguage: {}, targetLanguage: {}", sourceLanguage, targetLanguage);
+            log.info("===============================");
+
+            log.info("Connecting caller to conference: {}", finalConferenceName);
 
             VoiceResponse response = new VoiceResponse.Builder()
                     .say(new Say.Builder("Welcome to the translation service. Connecting you now.")
                             .voice(Say.Voice.ALICE)
                             .build())
                     .dial(new Dial.Builder()
-                            .conference(new Conference.Builder(conferenceName != null ? conferenceName : "default-conference")
+                            .conference(new Conference.Builder(finalConferenceName != null ? finalConferenceName : "default-conference")
                                     .startConferenceOnEnter(true)
                                     .endConferenceOnExit(true)
                                     .record(Conference.Record.RECORD_FROM_START)
@@ -214,6 +250,22 @@ public class CallController {
         }
     }
 
+    @PostMapping("/end-conference")
+    public ResponseEntity<Map<String, String>> endConference(@RequestBody Map<String, String> request) {
+        try {
+            String conferenceName = request.get("conferenceName");
+            log.info("Ending conference: {}", conferenceName);
+            
+            // You could add logic here to end the conference if needed
+            Map<String, String> response = new HashMap<>();
+            response.put("status", "conference ended");
+            return ResponseEntity.ok(response);
+        } catch (Exception e) {
+            log.error("Error ending conference", e);
+            return ResponseEntity.internalServerError().build();
+        }
+    }
+
     @GetMapping("/conference/participants")
     public ResponseEntity<Map<String, Object>> getConferenceParticipants(
             @RequestParam String conferenceName) {
@@ -235,9 +287,13 @@ public class CallController {
     public ResponseEntity<String> handleIncomingCall(
             @RequestParam(required = false) String From,
             @RequestParam(required = false) String To,
-            @RequestParam(required = false) String CallSid) {
+            @RequestParam(required = false) String CallSid,
+            HttpServletRequest request) {
         try {
             log.info("Legacy incoming call - From: {}, To: {}, CallSid: {}", From, To, CallSid);
+            
+            // Log all parameters for debugging legacy calls too
+            log.info("Legacy call parameters: {}", request.getParameterMap());
 
             VoiceResponse response = new VoiceResponse.Builder()
                     .say(new Say.Builder("Welcome to the translation service.")
