@@ -144,6 +144,39 @@ public class CallController {
         return ResponseEntity.ok("OK");
     }
 
+    @PostMapping(value = "/conference/connect", produces = MediaType.APPLICATION_XML_VALUE)
+    public ResponseEntity<String> handleConferenceConnect(@RequestParam Map<String, String> params) {
+        try {
+            String callSid = params.get("CallSid");
+            String from = params.get("From");
+            
+            logger.info("Conference connect - CallSid: {}, From: {}", callSid, from);
+            
+            // Create the same conference name as the original caller
+            String conferenceName = "translation-call-" + callSid;
+            
+            VoiceResponse response = new VoiceResponse.Builder()
+                .dial(new Dial.Builder()
+                    .conference(new Conference.Builder(conferenceName)
+                        .startConferenceOnEnter(true)
+                        .endConferenceOnExit(true)
+                        .build())
+                    .build())
+                .build();
+
+            return ResponseEntity.ok(response.toXml());
+            
+        } catch (Exception e) {
+            logger.error("Error handling conference connect", e);
+            
+            VoiceResponse errorResponse = new VoiceResponse.Builder()
+                .say(new Say.Builder("Sorry, there was an error connecting to the conference.").build())
+                .build();
+                
+            return ResponseEntity.ok(errorResponse.toXml());
+        }
+    }
+
     @GetMapping("/health")
     public ResponseEntity<Map<String, String>> health() {
         Map<String, String> status = new HashMap<>();
