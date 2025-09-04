@@ -125,10 +125,9 @@ public class CallController {
                     .language(Say.Language.EN_US)
                     .build();
 
-            // Create conference dial for the browser caller
+            // Create conference dial for the browser caller (FIXED: removed invalid methods)
             com.twilio.twiml.voice.Conference conference = new com.twilio.twiml.voice.Conference.Builder(conferenceName)
                     .record(com.twilio.twiml.voice.Conference.Record.RECORD_FROM_START)
-                    .statusCallbackEvent("start join leave end")
                     .statusCallback("https://talktranslate-backend-production.up.railway.app/api/call/conference/status")
                     .waitUrl("http://twimlets.com/holdmusic?Bucket=com.twilio.music.classical")
                     .build();
@@ -214,9 +213,9 @@ public class CallController {
                     .language(Say.Language.EN_US)
                     .build();
 
+            // FIXED: removed invalid statusCallbackEvent method
             com.twilio.twiml.voice.Conference conference = new com.twilio.twiml.voice.Conference.Builder(conferenceName)
                     .record(com.twilio.twiml.voice.Conference.Record.RECORD_FROM_START)
-                    .statusCallbackEvent("start join leave end")
                     .statusCallback("https://talktranslate-backend-production.up.railway.app/api/call/conference/status")
                     .build();
 
@@ -251,19 +250,23 @@ public class CallController {
         String conferenceName = params.get("FriendlyName");
         String participantSid = params.get("CallSid");
         
-        switch (event) {
-            case "conference-start":
-                log.info("Conference started: {}", conferenceName);
-                break;
-            case "participant-join":
-                log.info("Participant joined conference {}: {}", conferenceName, participantSid);
-                break;
-            case "participant-leave":
-                log.info("Participant left conference {}: {}", conferenceName, participantSid);
-                break;
-            case "conference-end":
-                log.info("Conference ended: {}", conferenceName);
-                break;
+        if (event != null) {
+            switch (event) {
+                case "conference-start":
+                    log.info("Conference started: {}", conferenceName);
+                    break;
+                case "participant-join":
+                    log.info("Participant joined conference {}: {}", conferenceName, participantSid);
+                    break;
+                case "participant-leave":
+                    log.info("Participant left conference {}: {}", conferenceName, participantSid);
+                    break;
+                case "conference-end":
+                    log.info("Conference ended: {}", conferenceName);
+                    break;
+                default:
+                    log.info("Conference event: {} for conference: {}", event, conferenceName);
+            }
         }
         
         return ResponseEntity.ok("<Response></Response>");
