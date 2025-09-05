@@ -3,375 +3,282 @@ package com.example.translationcallapp.controller;
 import com.example.translationcallapp.service.AudioFileStorageService;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.beans.factory.annotation.Autowired;
-import org.springframework.beans.factory.annotation.Value;
 import org.springframework.core.io.Resource;
 import org.springframework.http.HttpHeaders;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.MediaType;
 import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.*;
+import org.springframework.web.multipart.MultipartFile;
 
-import java.nio.file.Files;
-import java.nio.file.Path;
-import java.nio.file.Paths;
-import java.util.regex.Pattern;
+import jakarta.servlet.http.HttpServletRequest;
+import java.io.IOException;
+import java.util.List;
+import java.util.Map;
 
+@Slf4j
 @RestController
 @RequestMapping("/api/audio")
-@CrossOrigin(
-    origins = {
-        "${app.frontend-url:https://talktranslate.netlify.app}",
-        "http://localhost:3000",
-        "http://localhost:5173",
-        "https://*.netlify.app"
-    },
-    allowCredentials = true,
-    maxAge = 3600
-)
-@Slf4j
+@CrossOrigin(origins = "*", maxAge = 3600)
 public class AudioFileController {
 
+    private final AudioFileStorageService audioFileStorageService;
+
     @Autowired
-    private AudioFileStorageService audioFileStorageService;
+    public AudioFileController(AudioFileStorageService audioFileStorageService) {
+        this.audioFileStorageService = audioFileStorageService;
+    }
 
-    // Security: Whitelist pattern for filenames - only alphanumeric, dots, hyphens, underscores
-    private static final Pattern VALID_FILENAME_PATTERN = Pattern.compile("^[a-zA-Z0-9._-]+$");
-    
-    // Maximum filename length to prevent long filename attacks
-    private static final int MAX_FILENAME_LENGTH = 255;
-
-    @Value("${audio.download.mode:inline}")
-    private String downloadMode; // "inline" or "attachment"
-
-    /**
-     * Serve translated audio files to Twilio with enhanced security
-     */
-    @GetMapping("/translated/{filename}")
-    public ResponseEntity<Resource> getTranslatedAudio(@PathVariable String filename) {
+    @PostMapping("/upload")
+    public ResponseEntity<?> uploadAudioFile(
+            @RequestParam("file") MultipartFile file,
+            @RequestParam(value = "conferenceId", required = false) String conferenceId,
+            @RequestParam(value = "direction", defaultValue = "inbound") String direction,
+            @RequestParam(value = "includeTranscript", defaultValue = "false") boolean includeTranscript,
+            @RequestParam(value = "language", defaultValue = "en") String language) {
+        
         try {
-            log.debug("Request for translated audio file: {}", filename);
+            log.info("Received audio file upload request - File: {}, Conference: {}, Direction: {}", 
+                    file.getOriginalFilename(), conferenceId, direction);
 
-            // Security: Validate filename to prevent path traversal attacks
-            if (!isValidFilename(filename)) {
-                log.warn("Invalid filename requested: {}", filename);
-                return ResponseEntity.badRequest().build();
+            if (file.isEmpty()) {
+                log.warn("Upload failed: Empty file received");
+                return ResponseEntity.badRequest()
+                        .body(Map.of("error", "File is empty", "success", false));
             }
 
-            // Get the audio file resource
-            Resource audioResource = audioFileStorageService.getAudioResource(filename);
-            
-            if (audioResource == null || !audioResource.exists()) {
-                log.warn("Audio file not found: {}", filename);
-                return ResponseEntity.notFound().build();
+            if (file.getSize() > 50 * 1024 * 1024) { // 50MB limit
+                log.warn("Upload failed: File too large - {} bytes", file.getSize());
+                return ResponseEntity.badRequest()
+                        .body(Map.of("error", "File size exceeds 50MB limit", "success", false));
             }
 
-            // Determine content type with enhanced detection
-            MediaType mediaType = determineMediaType(filename, audioResource);
-            
-            // Get file size for Content-Length header
-            long contentLength = audioResource.contentLength();
+            String fileId = audioFileStorageService.storeAudioFile(file, conferenceId, direction);
+            log.info("Audio file stored successfully with ID: {}", fileId);
 
-            log.debug("Serving audio file: {}, size: {} bytes, type: {}", 
-                     filename, contentLength, mediaType);
+            Map<String, Object> response = Map.of(
+                    "success", true,
+                    "fileId", fileId,
+                    "message", "File uploaded successfully",
+                    "filename", file.getOriginalFilename(),
+                    "size", file.getSize()
+            );
 
-            // Build response with security headers
-            ResponseEntity.BodyBuilder responseBuilder = ResponseEntity.ok()
-                    .contentType(mediaType)
-                    .contentLength(contentLength)
-                    .header(HttpHeaders.CACHE_CONTROL, "no-cache, no-store, must-revalidate")
-                    .header(HttpHeaders.PRAGMA, "no-cache")
-                    .header(HttpHeaders.EXPIRES, "0")
-                    .header("X-Content-Type-Options", "nosniff")
-                    .header("X-Frame-Options", "DENY");
+            return ResponseEntity.ok(response);
 
-            // Add Content-Disposition based on configuration
-            if ("attachment".equals(downloadMode)) {
-                responseBuilder.header(HttpHeaders.CONTENT_DISPOSITION, 
-                    "attachment; filename=\"" + sanitizeFilenameForHeader(filename) + "\"");
-            } else {
-                responseBuilder.header(HttpHeaders.CONTENT_DISPOSITION, 
-                    "inline; filename=\"" + sanitizeFilenameForHeader(filename) + "\"");
-            }
-
-            return responseBuilder.body(audioResource);
-
+        } catch (IOException e) {
+            log.error("IO error during file upload: {}", e.getMessage(), e);
+            return ResponseEntity.status(HttpStatus.INTERNAL_SERVER_ERROR)
+                    .body(Map.of("error", "Failed to upload file: " + e.getMessage(), "success", false));
         } catch (Exception e) {
-            log.error("Error serving audio file: {}", filename, e);
-            return ResponseEntity.status(HttpStatus.INTERNAL_SERVER_ERROR).build();
+            log.error("Unexpected error during file upload: {}", e.getMessage(), e);
+            return ResponseEntity.status(HttpStatus.INTERNAL_SERVER_ERROR)
+                    .body(Map.of("error", "Internal server error", "success", false));
         }
     }
 
-    /**
-     * Serve audio files with conference and direction context
-     */
-    @GetMapping("/conference/{conferenceName}/{direction}/{filename}")
-    public ResponseEntity<Resource> getConferenceAudio(
-            @PathVariable String conferenceName,
-            @PathVariable String direction,
-            @PathVariable String filename) {
+    @GetMapping("/download/{fileId}")
+    public ResponseEntity<Resource> downloadAudioFile(
+            @PathVariable String fileId,
+            HttpServletRequest request) {
+        
         try {
-            log.debug("Request for conference audio - Conference: {}, Direction: {}, File: {}", 
-                     conferenceName, direction, filename);
+            log.info("Download request for file ID: {}", fileId);
 
-            // Security: Validate all path parameters
-            if (!isValidFilename(filename) || !isValidConferenceName(conferenceName) || !isValidDirection(direction)) {
-                log.warn("Invalid parameters - Conference: {}, Direction: {}, File: {}", 
-                        conferenceName, direction, filename);
-                return ResponseEntity.badRequest().build();
-            }
-
-            // Get the audio file resource with conference context
-            Resource audioResource = audioFileStorageService.getConferenceAudioResource(
-                conferenceName, direction, filename);
+            Resource resource = audioFileStorageService.loadAudioFileAsResource(fileId);
             
-            if (audioResource == null || !audioResource.exists()) {
-                log.warn("Conference audio file not found - Conference: {}, Direction: {}, File: {}", 
-                        conferenceName, direction, filename);
+            if (resource == null || !resource.exists()) {
+                log.warn("File not found for ID: {}", fileId);
                 return ResponseEntity.notFound().build();
             }
 
-            MediaType mediaType = determineMediaType(filename, audioResource);
-            long contentLength = audioResource.contentLength();
+            // Determine content type
+            String contentType = null;
+            try {
+                contentType = request.getServletContext().getMimeType(resource.getFile().getAbsolutePath());
+            } catch (IOException ex) {
+                log.debug("Could not determine file type for file ID: {}", fileId);
+            }
 
-            log.debug("Serving conference audio file: {}, size: {} bytes", filename, contentLength);
+            if (contentType == null) {
+                contentType = "application/octet-stream";
+            }
+
+            String filename = resource.getFilename();
+            log.info("Serving file: {} with content type: {}", filename, contentType);
 
             return ResponseEntity.ok()
-                    .contentType(mediaType)
-                    .contentLength(contentLength)
-                    .header(HttpHeaders.CACHE_CONTROL, "no-cache, no-store, must-revalidate")
-                    .header(HttpHeaders.PRAGMA, "no-cache")
-                    .header(HttpHeaders.EXPIRES, "0")
-                    .header("X-Content-Type-Options", "nosniff")
-                    .header("X-Frame-Options", "DENY")
-                    .header("X-Conference-Name", sanitizeHeaderValue(conferenceName))
-                    .header("X-Translation-Direction", sanitizeHeaderValue(direction))
-                    .body(audioResource);
+                    .contentType(MediaType.parseMediaType(contentType))
+                    .header(HttpHeaders.CONTENT_DISPOSITION, 
+                           "attachment; filename=\"" + filename + "\"")
+                    .body(resource);
 
         } catch (Exception e) {
-            log.error("Error serving conference audio file - Conference: {}, Direction: {}, File: {}", 
-                     conferenceName, direction, filename, e);
+            log.error("Error downloading file with ID {}: {}", fileId, e.getMessage(), e);
             return ResponseEntity.status(HttpStatus.INTERNAL_SERVER_ERROR).build();
         }
     }
 
-    /**
-     * Health check endpoint for audio service
-     */
-    @GetMapping("/health")
-    public ResponseEntity<AudioServiceHealth> healthCheck() {
+    @GetMapping("/stream/{fileId}")
+    public ResponseEntity<Resource> streamAudioFile(@PathVariable String fileId) {
         try {
-            boolean isHealthy = audioFileStorageService.isServiceHealthy();
-            int activeFiles = audioFileStorageService.getActiveFileCount();
-            double storageUsed = audioFileStorageService.getStorageUsedMB();
+            log.info("Stream request for file ID: {}", fileId);
+
+            Resource resource = audioFileStorageService.loadAudioFileAsResource(fileId);
             
-            AudioServiceHealth health = new AudioServiceHealth(
-                isHealthy ? "UP" : "DOWN",
-                activeFiles,
-                storageUsed,
-                System.currentTimeMillis()
+            if (resource == null || !resource.exists()) {
+                log.warn("File not found for streaming, ID: {}", fileId);
+                return ResponseEntity.notFound().build();
+            }
+
+            return ResponseEntity.ok()
+                    .contentType(MediaType.APPLICATION_OCTET_STREAM)
+                    .header(HttpHeaders.CONTENT_DISPOSITION, "inline")
+                    .body(resource);
+
+        } catch (Exception e) {
+            log.error("Error streaming file with ID {}: {}", fileId, e.getMessage(), e);
+            return ResponseEntity.status(HttpStatus.INTERNAL_SERVER_ERROR).build();
+        }
+    }
+
+    @GetMapping("/list")
+    public ResponseEntity<?> listAudioFiles(
+            @RequestParam(value = "conferenceId", required = false) String conferenceId,
+            @RequestParam(value = "limit", defaultValue = "50") int limit,
+            @RequestParam(value = "offset", defaultValue = "0") int offset) {
+        
+        try {
+            log.info("List audio files request - Conference: {}, Limit: {}, Offset: {}", 
+                    conferenceId, limit, offset);
+
+            List<Map<String, Object>> files = audioFileStorageService.listAudioFiles(
+                    conferenceId, limit, offset);
+
+            Map<String, Object> response = Map.of(
+                    "success", true,
+                    "files", files,
+                    "count", files.size(),
+                    "limit", limit,
+                    "offset", offset
             );
-            
-            if (isHealthy) {
-                return ResponseEntity.ok(health);
-            } else {
-                return ResponseEntity.status(HttpStatus.SERVICE_UNAVAILABLE).body(health);
-            }
-            
-        } catch (Exception e) {
-            log.error("Error in audio service health check", e);
-            AudioServiceHealth health = new AudioServiceHealth("ERROR", 0, 0.0, System.currentTimeMillis());
-            return ResponseEntity.status(HttpStatus.INTERNAL_SERVER_ERROR).body(health);
-        }
-    }
 
-    /**
-     * Get audio service statistics (protected endpoint)
-     */
-    @GetMapping("/stats")
-    public ResponseEntity<AudioServiceStats> getAudioStats() {
-        try {
-            AudioServiceStats stats = new AudioServiceStats();
-            stats.setActiveFiles(audioFileStorageService.getActiveFileCount());
-            stats.setTotalFilesServed(audioFileStorageService.getTotalFilesServed());
-            stats.setStorageUsed(audioFileStorageService.getStorageUsedMB());
-            
-            return ResponseEntity.ok(stats);
-            
-        } catch (Exception e) {
-            log.error("Error getting audio service statistics", e);
-            return ResponseEntity.status(HttpStatus.INTERNAL_SERVER_ERROR).build();
-        }
-    }
+            return ResponseEntity.ok(response);
 
-    /**
-     * Manual cleanup endpoint (for debugging/maintenance)
-     */
-    @PostMapping("/cleanup")
-    public ResponseEntity<CleanupResult> manualCleanup() {
-        try {
-            log.info("Manual audio file cleanup requested");
-            
-            int cleanedFiles = audioFileStorageService.performManualCleanup();
-            
-            CleanupResult result = new CleanupResult(cleanedFiles, System.currentTimeMillis());
-            log.info("Manual cleanup completed: {} files removed", cleanedFiles);
-            
-            return ResponseEntity.ok(result);
-            
         } catch (Exception e) {
-            log.error("Error during manual cleanup", e);
+            log.error("Error listing audio files: {}", e.getMessage(), e);
             return ResponseEntity.status(HttpStatus.INTERNAL_SERVER_ERROR)
-                    .body(new CleanupResult(0, System.currentTimeMillis()));
+                    .body(Map.of("error", "Failed to list files", "success", false));
         }
     }
 
-    /**
-     * Security: Validate filename to prevent path traversal attacks
-     */
-    private boolean isValidFilename(String filename) {
-        if (filename == null || filename.trim().isEmpty()) {
-            return false;
-        }
-        
-        if (filename.length() > MAX_FILENAME_LENGTH) {
-            return false;
-        }
-        
-        // Check for path traversal attempts
-        if (filename.contains("..") || filename.contains("/") || filename.contains("\\")) {
-            return false;
-        }
-        
-        // Must match our whitelist pattern
-        return VALID_FILENAME_PATTERN.matcher(filename).matches();
-    }
-
-    /**
-     * Security: Validate conference name
-     */
-    private boolean isValidConferenceName(String conferenceName) {
-        if (conferenceName == null || conferenceName.trim().isEmpty()) {
-            return false;
-        }
-        
-        // Conference names should be alphanumeric with hyphens
-        return conferenceName.matches("^[a-zA-Z0-9-]+$") && conferenceName.length() <= 100;
-    }
-
-    /**
-     * Security: Validate direction parameter
-     */
-    private boolean isValidDirection(String direction) {
-        return "caller-to-target".equals(direction) || "target-to-caller".equals(direction);
-    }
-
-    /**
-     * Sanitize filename for use in Content-Disposition header
-     */
-    private String sanitizeFilenameForHeader(String filename) {
-        // Remove any characters that could cause header injection
-        return filename.replaceAll("[^a-zA-Z0-9._-]", "_");
-    }
-
-    /**
-     * Sanitize values for use in custom headers
-     */
-    private String sanitizeHeaderValue(String value) {
-        // Remove any characters that could cause header injection
-        return value.replaceAll("[\\r\\n\\t]", "");
-    }
-
-    /**
-     * Enhanced media type determination with file probing
-     */
-    private MediaType determineMediaType(String filename, Resource resource) {
-        if (filename == null) {
-            return MediaType.APPLICATION_OCTET_STREAM;
-        }
-        
-        String lowerFilename = filename.toLowerCase();
-        
-        // Try file extension first
-        if (lowerFilename.endsWith(".wav")) {
-            return MediaType.parseMediaType("audio/wav");
-        } else if (lowerFilename.endsWith(".mp3")) {
-            return MediaType.parseMediaType("audio/mpeg");
-        } else if (lowerFilename.endsWith(".ogg")) {
-            return MediaType.parseMediaType("audio/ogg");
-        } else if (lowerFilename.endsWith(".m4a")) {
-            return MediaType.parseMediaType("audio/mp4");
-        }
-        
-        // Try to probe content type from file content
+    @DeleteMapping("/{fileId}")
+    public ResponseEntity<?> deleteAudioFile(@PathVariable String fileId) {
         try {
-            if (resource.getFile() != null) {
-                Path path = resource.getFile().toPath();
-                String contentType = Files.probeContentType(path);
-                if (contentType != null && contentType.startsWith("audio/")) {
-                    return MediaType.parseMediaType(contentType);
-                }
+            log.info("Delete request for file ID: {}", fileId);
+
+            boolean deleted = audioFileStorageService.deleteAudioFile(fileId);
+            
+            if (deleted) {
+                log.info("File deleted successfully: {}", fileId);
+                return ResponseEntity.ok(Map.of("success", true, "message", "File deleted successfully"));
+            } else {
+                log.warn("File not found for deletion: {}", fileId);
+                return ResponseEntity.notFound().build();
             }
+
         } catch (Exception e) {
-            log.debug("Could not probe content type for file: {}", filename);
+            log.error("Error deleting file with ID {}: {}", fileId, e.getMessage(), e);
+            return ResponseEntity.status(HttpStatus.INTERNAL_SERVER_ERROR)
+                    .body(Map.of("error", "Failed to delete file", "success", false));
         }
-        
-        return MediaType.APPLICATION_OCTET_STREAM;
     }
 
-    /**
-     * Audio service health DTO
-     */
-    public static class AudioServiceHealth {
-        private final String status;
-        private final int activeFiles;
-        private final double storageUsedMB;
-        private final long timestamp;
+    @GetMapping("/info/{fileId}")
+    public ResponseEntity<?> getAudioFileInfo(@PathVariable String fileId) {
+        try {
+            log.info("Info request for file ID: {}", fileId);
 
-        public AudioServiceHealth(String status, int activeFiles, double storageUsedMB, long timestamp) {
-            this.status = status;
-            this.activeFiles = activeFiles;
-            this.storageUsedMB = storageUsedMB;
-            this.timestamp = timestamp;
+            Map<String, Object> fileInfo = audioFileStorageService.getAudioFileInfo(fileId);
+            
+            if (fileInfo != null) {
+                return ResponseEntity.ok(Map.of("success", true, "fileInfo", fileInfo));
+            } else {
+                log.warn("File info not found for ID: {}", fileId);
+                return ResponseEntity.notFound().build();
+            }
+
+        } catch (Exception e) {
+            log.error("Error getting file info for ID {}: {}", fileId, e.getMessage(), e);
+            return ResponseEntity.status(HttpStatus.INTERNAL_SERVER_ERROR)
+                    .body(Map.of("error", "Failed to get file info", "success", false));
         }
-
-        public String getStatus() { return status; }
-        public int getActiveFiles() { return activeFiles; }
-        public double getStorageUsedMB() { return storageUsedMB; }
-        public long getTimestamp() { return timestamp; }
     }
 
-    /**
-     * Audio service statistics DTO
-     */
-    public static class AudioServiceStats {
-        private int activeFiles;
-        private long totalFilesServed;
-        private double storageUsed;
+    @PostMapping("/process/{fileId}")
+    public ResponseEntity<?> processAudioFile(
+            @PathVariable String fileId,
+            @RequestParam(value = "operation", defaultValue = "transcribe") String operation,
+            @RequestParam(value = "targetLanguage", required = false) String targetLanguage) {
+        
+        try {
+            log.info("Process request for file ID: {} with operation: {}", fileId, operation);
 
-        // Getters and setters
-        public int getActiveFiles() { return activeFiles; }
-        public void setActiveFiles(int activeFiles) { this.activeFiles = activeFiles; }
-        
-        public long getTotalFilesServed() { return totalFilesServed; }
-        public void setTotalFilesServed(long totalFilesServed) { this.totalFilesServed = totalFilesServed; }
-        
-        public double getStorageUsed() { return storageUsed; }
-        public void setStorageUsed(double storageUsed) { this.storageUsed = storageUsed; }
+            Map<String, Object> result = audioFileStorageService.processAudioFile(
+                    fileId, operation, targetLanguage);
+            
+            if (result != null) {
+                return ResponseEntity.ok(Map.of("success", true, "result", result));
+            } else {
+                return ResponseEntity.badRequest()
+                        .body(Map.of("error", "Processing failed", "success", false));
+            }
+
+        } catch (Exception e) {
+            log.error("Error processing file with ID {}: {}", fileId, e.getMessage(), e);
+            return ResponseEntity.status(HttpStatus.INTERNAL_SERVER_ERROR)
+                    .body(Map.of("error", "Processing failed: " + e.getMessage(), "success", false));
+        }
     }
 
-    /**
-     * Cleanup result DTO
-     */
-    public static class CleanupResult {
-        private final int filesRemoved;
-        private final long timestamp;
-
-        public CleanupResult(int filesRemoved, long timestamp) {
-            this.filesRemoved = filesRemoved;
-            this.timestamp = timestamp;
+    @GetMapping("/status")
+    public ResponseEntity<?> getStorageStatus() {
+        try {
+            Map<String, Object> status = audioFileStorageService.getStorageStatus();
+            return ResponseEntity.ok(Map.of("success", true, "status", status));
+        } catch (Exception e) {
+            log.error("Error getting storage status: {}", e.getMessage(), e);
+            return ResponseEntity.status(HttpStatus.INTERNAL_SERVER_ERROR)
+                    .body(Map.of("error", "Failed to get status", "success", false));
         }
+    }
 
-        public int getFilesRemoved() { return filesRemoved; }
-        public long getTimestamp() { return timestamp; }
+    @PostMapping("/cleanup")
+    public ResponseEntity<?> cleanupOldFiles(
+            @RequestParam(value = "olderThanDays", defaultValue = "7") int olderThanDays) {
+        
+        try {
+            log.info("Cleanup request for files older than {} days", olderThanDays);
+
+            int deletedCount = audioFileStorageService.cleanupOldFiles(olderThanDays);
+            
+            return ResponseEntity.ok(Map.of(
+                    "success", true,
+                    "message", "Cleanup completed",
+                    "deletedFiles", deletedCount
+            ));
+
+        } catch (Exception e) {
+            log.error("Error during cleanup: {}", e.getMessage(), e);
+            return ResponseEntity.status(HttpStatus.INTERNAL_SERVER_ERROR)
+                    .body(Map.of("error", "Cleanup failed", "success", false));
+        }
+    }
+
+    @ExceptionHandler(Exception.class)
+    public ResponseEntity<?> handleException(Exception e) {
+        log.error("Unhandled exception in AudioFileController: {}", e.getMessage(), e);
+        return ResponseEntity.status(HttpStatus.INTERNAL_SERVER_ERROR)
+                .body(Map.of("error", "Internal server error", "success", false));
     }
 }

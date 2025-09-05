@@ -2,363 +2,447 @@ package com.example.translationcallapp.service;
 
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
-import com.fasterxml.jackson.databind.node.ObjectNode;
 import lombok.extern.slf4j.Slf4j;
-import org.springframework.beans.factory.annotation.Autowired;
+import org.apache.http.HttpEntity;
+import org.apache.http.client.methods.CloseableHttpResponse;
+import org.apache.http.client.methods.HttpPost;
+import org.apache.http.entity.ContentType;
+import org.apache.http.entity.StringEntity;
+import org.apache.http.entity.mime.MultipartEntityBuilder;
+import org.apache.http.impl.client.CloseableHttpClient;
+import org.apache.http.impl.client.HttpClients;
+import org.apache.http.util.EntityUtils;
 import org.springframework.beans.factory.annotation.Value;
-import org.springframework.http.*;
+import org.springframework.core.io.Resource;
 import org.springframework.stereotype.Service;
-import org.springframework.web.client.RestTemplate;
 
-import javax.annotation.PreDestroy;
-import java.util.Base64;
-import java.util.concurrent.ConcurrentHashMap;
-import java.util.concurrent.ScheduledExecutorService;
+import jakarta.annotation.PreDestroy;
+import java.io.ByteArrayInputStream;
+import java.io.IOException;
+import java.io.InputStream;
+import java.util.*;
+import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.TimeUnit;
 
-@Service
 @Slf4j
+@Service
 public class OpenAITranslationService {
 
     @Value("${openai.api.key}")
     private String openaiApiKey;
 
-    @Value("${openai.whisper.model:whisper-1}")
+    @Value("${openai.api.base.url:https://api.openai.com/v1}")
+    private String openaiBaseUrl;
+
+    @Value("${openai.model.whisper:whisper-1}")
     private String whisperModel;
 
-    @Value("${openai.chat.model:gpt-4}")
-    private String chatModel;
-
-    @Value("${openai.chat.max-tokens:150}")
-    private int maxTokens;
-
-    @Value("${openai.tts.model:tts-1}")
+    @Value("${openai.model.tts:tts-1}")
     private String ttsModel;
+
+    @Value("${openai.model.chat:gpt-3.5-turbo}")
+    private String chatModel;
 
     @Value("${openai.tts.voice:alloy}")
     private String ttsVoice;
 
-    @Autowired
-    private AudioFormatConversionService audioConversionService;
-
-    @Autowired
-    private BotParticipantService botParticipantService;
-
-    @Autowired
-    private AudioFileStorageService audioFileStorageService;
-
     private final ObjectMapper objectMapper = new ObjectMapper();
-    private final RestTemplate restTemplate = new RestTemplate();
-    private final ScheduledExecutorService scheduler = Executors.newScheduledThreadPool(4);
-
-    // Store active translation sessions
-    private final ConcurrentHashMap<String, TranslationSession> translationSessions = new ConcurrentHashMap<>();
+    private final CloseableHttpClient httpClient;
+    private final ExecutorService executorService = Executors.newFixedThreadPool(10);
+    
+    // Cache for language detection and translation optimization
+    private final Map<String, String> languageCache = new HashMap<>();
+    
+    public OpenAITranslationService() {
+        this.httpClient = HttpClients.createDefault();
+        log.info("OpenAI Translation Service initialized");
+    }
 
     /**
-     * Start bidirectional translation for a conference
+     * Transcribe audio using OpenAI Whisper
      */
-    public boolean startTranslation(String conferenceName, String sourceLanguage, String targetLanguage) {
-        try {
-            log.info("Starting translation for conference: {}, {} -> {}", 
-                    conferenceName, sourceLanguage, targetLanguage);
-
-            TranslationSession session = new TranslationSession(conferenceName, sourceLanguage, targetLanguage);
-            translationSessions.put(conferenceName, session);
-
-            log.info("Translation session started for conference: {}", conferenceName);
-            return true;
-
-        } catch (Exception e) {
-            log.error("Failed to start translation for conference: {}", conferenceName, e);
-            return false;
+    public String transcribeAudio(Resource audioResource) throws IOException {
+        log.info("Transcribing audio resource: {}", audioResource.getFilename());
+        
+        try (InputStream audioStream = audioResource.getInputStream()) {
+            return transcribeAudio(audioStream, audioResource.getFilename());
         }
     }
 
     /**
-     * Process audio from a conference participant using standard OpenAI API
+     * Transcribe audio from InputStream
      */
-    public void processAudio(String conferenceName, String participant, String base64Audio) {
-        try {
-            TranslationSession session = translationSessions.get(conferenceName);
-            if (session == null) {
-                log.warn("No translation session found for conference: {}", conferenceName);
-                return;
+    public String transcribeAudio(InputStream audioStream, String filename) throws IOException {
+        String url = openaiBaseUrl + "/audio/transcriptions";
+        
+        HttpPost httpPost = new HttpPost(url);
+        httpPost.setHeader("Authorization", "Bearer " + openaiApiKey);
+
+        // Build multipart entity
+        MultipartEntityBuilder builder = MultipartEntityBuilder.create();
+        builder.addBinaryBody("file", audioStream, ContentType.APPLICATION_OCTET_STREAM, filename);
+        builder.addTextBody("model", whisperModel);
+        builder.addTextBody("response_format", "json");
+        builder.addTextBody("language", "auto"); // Auto-detect language
+        
+        httpPost.setEntity(builder.build());
+
+        try (CloseableHttpResponse response = httpClient.execute(httpPost)) {
+            String responseBody = EntityUtils.toString(response.getEntity());
+            
+            if (response.getStatusLine().getStatusCode() == 200) {
+                JsonNode jsonResponse = objectMapper.readTree(responseBody);
+                String transcription = jsonResponse.get("text").asText();
+                
+                log.info("Audio transcription completed successfully");
+                return transcription;
+            } else {
+                log.error("Transcription failed with status: {} - {}", 
+                         response.getStatusLine().getStatusCode(), responseBody);
+                throw new IOException("Transcription failed: " + responseBody);
             }
-
-            // Step 1: Convert Twilio audio to WAV format for Whisper
-            String wavAudio = audioConversionService.convertTwilioToWav(base64Audio);
-            if (wavAudio == null) {
-                log.warn("Failed to convert audio format for conference: {}", conferenceName);
-                return;
-            }
-
-            // Step 2: Transcribe audio using Whisper
-            String transcription = transcribeAudio(wavAudio, session.getSourceLanguage());
-            if (transcription == null || transcription.trim().isEmpty()) {
-                log.debug("No transcription available for conference: {}", conferenceName);
-                return;
-            }
-
-            log.debug("Transcribed text: {}", transcription);
-
-            // Step 3: Translate text using GPT-4
-            String translation = translateText(transcription, session.getSourceLanguage(), session.getTargetLanguage());
-            if (translation == null || translation.trim().isEmpty()) {
-                log.warn("Translation failed for conference: {}", conferenceName);
-                return;
-            }
-
-            log.debug("Translated text: {}", translation);
-
-            // Step 4: Convert text to speech using TTS
-            String audioBase64 = textToSpeech(translation);
-            if (audioBase64 == null) {
-                log.warn("TTS failed for conference: {}", conferenceName);
-                return;
-            }
-
-            // Step 5: Convert to Twilio format and store
-            String twilioAudio = audioConversionService.convertToTwilio(audioBase64);
-            if (twilioAudio == null) {
-                log.warn("Failed to convert TTS audio to Twilio format");
-                return;
-            }
-
-            // Step 6: Store and play audio
-            String direction = "caller".equals(participant) ? "caller-to-target" : "target-to-caller";
-            String audioUrl = audioFileStorageService.storeTranslatedAudio(twilioAudio, conferenceName, direction);
-            if (audioUrl != null) {
-                boolean success = botParticipantService.playTranslatedAudio(conferenceName, audioUrl);
-                if (success) {
-                    log.info("Successfully played translation for conference: {}", conferenceName);
-                }
-
-                // Schedule cleanup
-                scheduler.schedule(() -> {
-                    audioFileStorageService.cleanupAudioFile(audioUrl);
-                }, 30, TimeUnit.SECONDS);
-            }
-
-        } catch (Exception e) {
-            log.error("Error processing audio for conference: {}", conferenceName, e);
         }
     }
 
     /**
-     * Process audio asynchronously
+     * Translate audio to target language
      */
-    public void processAudioAsync(String conferenceName, String participant, String base64Audio, Runnable queueCallback) {
-        scheduler.submit(() -> {
-            try {
-                processAudio(conferenceName, participant, base64Audio);
-            } catch (Exception e) {
-                log.error("Error in async audio processing for conference: {}", conferenceName, e);
-            } finally {
-                if (queueCallback != null) {
-                    queueCallback.run();
-                }
-            }
-        });
+    public String translateAudio(Resource audioResource, String targetLanguage) throws IOException {
+        log.info("Translating audio to language: {}", targetLanguage);
+        
+        // First transcribe the audio
+        String transcription = transcribeAudio(audioResource);
+        
+        // Then translate the text
+        return translateText(transcription, null, targetLanguage);
     }
 
     /**
-     * Transcribe audio using Whisper API
+     * Translate text using OpenAI Chat API
      */
-    private String transcribeAudio(String base64Audio, String language) {
-        try {
-            // Create multipart request for Whisper API
-            HttpHeaders headers = new HttpHeaders();
-            headers.setContentType(MediaType.MULTIPART_FORM_DATA);
-            headers.setBearerAuth(openaiApiKey);
-
-            // Decode audio data
-            byte[] audioData = Base64.getDecoder().decode(base64Audio);
-
-            // Create form data
-            String boundary = "----WebKitFormBoundary" + System.currentTimeMillis();
-            headers.setContentType(MediaType.parseMediaType("multipart/form-data; boundary=" + boundary));
-
-            StringBuilder body = new StringBuilder();
-            body.append("--").append(boundary).append("\r\n");
-            body.append("Content-Disposition: form-data; name=\"file\"; filename=\"audio.wav\"\r\n");
-            body.append("Content-Type: audio/wav\r\n\r\n");
-            // Note: In a real implementation, you'd need to properly handle binary data in multipart
-            body.append(Base64.getEncoder().encodeToString(audioData)).append("\r\n");
-            
-            body.append("--").append(boundary).append("\r\n");
-            body.append("Content-Disposition: form-data; name=\"model\"\r\n\r\n");
-            body.append(whisperModel).append("\r\n");
-            
-            if (language != null && !language.isEmpty()) {
-                body.append("--").append(boundary).append("\r\n");
-                body.append("Content-Disposition: form-data; name=\"language\"\r\n\r\n");
-                body.append(language.substring(0, 2)).append("\r\n"); // Use language code like "en"
-            }
-            
-            body.append("--").append(boundary).append("--\r\n");
-
-            HttpEntity<String> request = new HttpEntity<>(body.toString(), headers);
-            
-            ResponseEntity<String> response = restTemplate.postForEntity(
-                "https://api.openai.com/v1/audio/transcriptions", 
-                request, 
-                String.class
-            );
-
-            if (response.getStatusCode() == HttpStatus.OK) {
-                JsonNode result = objectMapper.readTree(response.getBody());
-                return result.get("text").asText();
-            }
-
-        } catch (Exception e) {
-            log.error("Failed to transcribe audio", e);
+    public String translateText(String text, String sourceLanguage, String targetLanguage) throws IOException {
+        log.info("Translating text from {} to {}", sourceLanguage, targetLanguage);
+        
+        if (text == null || text.trim().isEmpty()) {
+            return "";
         }
-        return null;
-    }
 
-    /**
-     * Translate text using GPT-4
-     */
-    private String translateText(String text, String sourceLanguage, String targetLanguage) {
-        try {
-            HttpHeaders headers = new HttpHeaders();
-            headers.setContentType(MediaType.APPLICATION_JSON);
-            headers.setBearerAuth(openaiApiKey);
+        String url = openaiBaseUrl + "/chat/completions";
+        
+        HttpPost httpPost = new HttpPost(url);
+        httpPost.setHeader("Authorization", "Bearer " + openaiApiKey);
+        httpPost.setHeader("Content-Type", "application/json");
 
-            ObjectNode request = objectMapper.createObjectNode();
-            request.put("model", chatModel);
-            request.put("max_tokens", maxTokens);
-            request.put("temperature", 0.3);
+        // Build translation prompt
+        String prompt = buildTranslationPrompt(text, sourceLanguage, targetLanguage);
+        
+        Map<String, Object> requestBody = new HashMap<>();
+        requestBody.put("model", chatModel);
+        requestBody.put("messages", Arrays.asList(
+            Map.of("role", "system", "content", "You are a professional translator. Translate the given text accurately while preserving the meaning and tone."),
+            Map.of("role", "user", "content", prompt)
+        ));
+        requestBody.put("max_tokens", 1000);
+        requestBody.put("temperature", 0.3); // Lower temperature for more consistent translations
 
-            // Create translation prompt
-            String prompt = String.format(
-                "Translate the following text from %s to %s. " +
-                "Provide only the translation, no explanations: \"%s\"",
-                sourceLanguage, targetLanguage, text
-            );
+        String jsonBody = objectMapper.writeValueAsString(requestBody);
+        httpPost.setEntity(new StringEntity(jsonBody, ContentType.APPLICATION_JSON));
 
-            ObjectNode message = objectMapper.createObjectNode();
-            message.put("role", "user");
-            message.put("content", prompt);
-
-            request.set("messages", objectMapper.createArrayNode().add(message));
-
-            HttpEntity<String> entity = new HttpEntity<>(request.toString(), headers);
+        try (CloseableHttpResponse response = httpClient.execute(httpPost)) {
+            String responseBody = EntityUtils.toString(response.getEntity());
             
-            ResponseEntity<String> response = restTemplate.postForEntity(
-                "https://api.openai.com/v1/chat/completions", 
-                entity, 
-                String.class
-            );
-
-            if (response.getStatusCode() == HttpStatus.OK) {
-                JsonNode result = objectMapper.readTree(response.getBody());
-                return result.get("choices").get(0).get("message").get("content").asText().trim();
+            if (response.getStatusLine().getStatusCode() == 200) {
+                JsonNode jsonResponse = objectMapper.readTree(responseBody);
+                String translation = jsonResponse.get("choices").get(0).get("message").get("content").asText().trim();
+                
+                log.info("Text translation completed successfully");
+                return translation;
+            } else {
+                log.error("Translation failed with status: {} - {}", 
+                         response.getStatusLine().getStatusCode(), responseBody);
+                throw new IOException("Translation failed: " + responseBody);
             }
-
-        } catch (Exception e) {
-            log.error("Failed to translate text", e);
         }
-        return null;
     }
 
     /**
      * Convert text to speech using OpenAI TTS
      */
-    private String textToSpeech(String text) {
-        try {
-            HttpHeaders headers = new HttpHeaders();
-            headers.setContentType(MediaType.APPLICATION_JSON);
-            headers.setBearerAuth(openaiApiKey);
-
-            ObjectNode request = objectMapper.createObjectNode();
-            request.put("model", ttsModel);
-            request.put("input", text);
-            request.put("voice", ttsVoice);
-            request.put("response_format", "mp3");
-
-            HttpEntity<String> entity = new HttpEntity<>(request.toString(), headers);
-            
-            ResponseEntity<byte[]> response = restTemplate.postForEntity(
-                "https://api.openai.com/v1/audio/speech", 
-                entity, 
-                byte[].class
-            );
-
-            if (response.getStatusCode() == HttpStatus.OK) {
-                return Base64.getEncoder().encodeToString(response.getBody());
+    public CompletableFuture<String> textToSpeech(String text) {
+        return CompletableFuture.supplyAsync(() -> {
+            try {
+                return performTextToSpeech(text);
+            } catch (IOException e) {
+                log.error("TTS error: {}", e.getMessage(), e);
+                throw new RuntimeException(e);
             }
-
-        } catch (Exception e) {
-            log.error("Failed to convert text to speech", e);
-        }
-        return null;
+        }, executorService);
     }
 
-    /**
-     * Stop translation for a conference
-     */
-    public boolean stopTranslation(String conferenceName) {
-        try {
-            TranslationSession session = translationSessions.remove(conferenceName);
-            if (session != null) {
-                log.info("Translation stopped for conference: {}", conferenceName);
-                return true;
+    private String performTextToSpeech(String text) throws IOException {
+        log.info("Converting text to speech: {} characters", text.length());
+        
+        if (text == null || text.trim().isEmpty()) {
+            return null;
+        }
+
+        String url = openaiBaseUrl + "/audio/speech";
+        
+        HttpPost httpPost = new HttpPost(url);
+        httpPost.setHeader("Authorization", "Bearer " + openaiApiKey);
+        httpPost.setHeader("Content-Type", "application/json");
+
+        Map<String, Object> requestBody = new HashMap<>();
+        requestBody.put("model", ttsModel);
+        requestBody.put("input", text);
+        requestBody.put("voice", ttsVoice);
+        requestBody.put("response_format", "mp3");
+        requestBody.put("speed", 1.0);
+
+        String jsonBody = objectMapper.writeValueAsString(requestBody);
+        httpPost.setEntity(new StringEntity(jsonBody, ContentType.APPLICATION_JSON));
+
+        try (CloseableHttpResponse response = httpClient.execute(httpPost)) {
+            if (response.getStatusLine().getStatusCode() == 200) {
+                HttpEntity entity = response.getEntity();
+                byte[] audioData = EntityUtils.toByteArray(entity);
+                
+                // Convert to base64 for transmission
+                String base64Audio = Base64.getEncoder().encodeToString(audioData);
+                
+                log.info("TTS completed successfully, generated {} bytes", audioData.length);
+                return base64Audio;
+            } else {
+                String responseBody = EntityUtils.toString(response.getEntity());
+                log.error("TTS failed with status: {} - {}", 
+                         response.getStatusLine().getStatusCode(), responseBody);
+                throw new IOException("TTS failed: " + responseBody);
             }
-            return false;
+        }
+    }
+
+    /**
+     * Process audio stream for real-time translation
+     */
+    public CompletableFuture<String> processAudioStream(String audioBase64, String sessionId) {
+        return CompletableFuture.supplyAsync(() -> {
+            try {
+                log.debug("Processing audio stream for session: {}", sessionId);
+                
+                // Decode base64 audio
+                byte[] audioData = Base64.getDecoder().decode(audioBase64);
+                
+                // Create temporary input stream
+                try (InputStream audioStream = new ByteArrayInputStream(audioData)) {
+                    
+                    // Transcribe audio
+                    String transcription = transcribeAudio(audioStream, "audio_" + sessionId + ".wav");
+                    
+                    if (transcription == null || transcription.trim().isEmpty()) {
+                        return null;
+                    }
+                    
+                    // Detect language if not specified
+                    String detectedLanguage = detectLanguage(transcription);
+                    log.debug("Detected language: {} for session: {}", detectedLanguage, sessionId);
+                    
+                    // For now, translate to English if not English, or to Spanish if English
+                    String targetLanguage = "en".equals(detectedLanguage) ? "es" : "en";
+                    
+                    // Translate text
+                    String translation = translateText(transcription, detectedLanguage, targetLanguage);
+                    
+                    log.info("Audio stream processed - Original: '{}' -> Translation: '{}'", 
+                            transcription, translation);
+                    
+                    return translation;
+                }
+                
+            } catch (Exception e) {
+                log.error("Error processing audio stream for session {}: {}", sessionId, e.getMessage(), e);
+                return null;
+            }
+        }, executorService);
+    }
+
+    /**
+     * Detect language of text using OpenAI
+     */
+    public String detectLanguage(String text) throws IOException {
+        if (text == null || text.trim().isEmpty()) {
+            return "en"; // Default to English
+        }
+        
+        // Check cache first
+        String cacheKey = text.substring(0, Math.min(50, text.length()));
+        if (languageCache.containsKey(cacheKey)) {
+            return languageCache.get(cacheKey);
+        }
+        
+        String url = openaiBaseUrl + "/chat/completions";
+        
+        HttpPost httpPost = new HttpPost(url);
+        httpPost.setHeader("Authorization", "Bearer " + openaiApiKey);
+        httpPost.setHeader("Content-Type", "application/json");
+
+        String prompt = "Detect the language of this text and respond with only the ISO 639-1 language code (e.g., 'en', 'es', 'fr'): " + text;
+        
+        Map<String, Object> requestBody = new HashMap<>();
+        requestBody.put("model", chatModel);
+        requestBody.put("messages", Arrays.asList(
+            Map.of("role", "user", "content", prompt)
+        ));
+        requestBody.put("max_tokens", 10);
+        requestBody.put("temperature", 0.1);
+
+        String jsonBody = objectMapper.writeValueAsString(requestBody);
+        httpPost.setEntity(new StringEntity(jsonBody, ContentType.APPLICATION_JSON));
+
+        try (CloseableHttpResponse response = httpClient.execute(httpPost)) {
+            if (response.getStatusLine().getStatusCode() == 200) {
+                String responseBody = EntityUtils.toString(response.getEntity());
+                JsonNode jsonResponse = objectMapper.readTree(responseBody);
+                String languageCode = jsonResponse.get("choices").get(0).get("message").get("content").asText().trim().toLowerCase();
+                
+                // Cache the result
+                languageCache.put(cacheKey, languageCode);
+                
+                return languageCode;
+            } else {
+                log.warn("Language detection failed, defaulting to English");
+                return "en";
+            }
+        }
+    }
+
+    /**
+     * Get supported languages
+     */
+    public List<Map<String, String>> getSupportedLanguages() {
+        List<Map<String, String>> languages = new ArrayList<>();
+        
+        // Common supported languages
+        String[][] languageData = {
+            {"en", "English"},
+            {"es", "Spanish"},
+            {"fr", "French"},
+            {"de", "German"},
+            {"it", "Italian"},
+            {"pt", "Portuguese"},
+            {"ru", "Russian"},
+            {"ja", "Japanese"},
+            {"ko", "Korean"},
+            {"zh", "Chinese"},
+            {"ar", "Arabic"},
+            {"hi", "Hindi"},
+            {"nl", "Dutch"},
+            {"pl", "Polish"},
+            {"sv", "Swedish"},
+            {"no", "Norwegian"},
+            {"da", "Danish"},
+            {"fi", "Finnish"},
+            {"tr", "Turkish"},
+            {"he", "Hebrew"}
+        };
+        
+        for (String[] lang : languageData) {
+            Map<String, String> langMap = new HashMap<>();
+            langMap.put("code", lang[0]);
+            langMap.put("name", lang[1]);
+            languages.add(langMap);
+        }
+        
+        return languages;
+    }
+
+    /**
+     * Health check for OpenAI API
+     */
+    public boolean isServiceHealthy() {
+        try {
+            // Simple test with minimal text
+            String testResult = translateText("Hello", "en", "es");
+            return testResult != null && !testResult.trim().isEmpty();
         } catch (Exception e) {
-            log.error("Error stopping translation for conference: {}", conferenceName, e);
+            log.error("Health check failed: {}", e.getMessage());
             return false;
         }
     }
 
     /**
-     * Check if translation is active
+     * Get service statistics
      */
-    public boolean isTranslationActive(String conferenceName) {
-        return translationSessions.containsKey(conferenceName);
+    public Map<String, Object> getServiceStats() {
+        Map<String, Object> stats = new HashMap<>();
+        stats.put("cacheSize", languageCache.size());
+        stats.put("executorActiveThreads", ((java.util.concurrent.ThreadPoolExecutor) executorService).getActiveCount());
+        stats.put("supportedLanguages", getSupportedLanguages().size());
+        stats.put("apiBaseUrl", openaiBaseUrl);
+        stats.put("whisperModel", whisperModel);
+        stats.put("chatModel", chatModel);
+        stats.put("ttsModel", ttsModel);
+        stats.put("healthy", isServiceHealthy());
+        return stats;
     }
 
-    /**
-     * Get active session count
-     */
-    public int getActiveSessionCount() {
-        return translationSessions.size();
+    private String buildTranslationPrompt(String text, String sourceLanguage, String targetLanguage) {
+        StringBuilder prompt = new StringBuilder();
+        
+        if (sourceLanguage != null && !sourceLanguage.isEmpty()) {
+            prompt.append("Translate the following text from ").append(getLanguageName(sourceLanguage))
+                  .append(" to ").append(getLanguageName(targetLanguage)).append(":\n\n");
+        } else {
+            prompt.append("Translate the following text to ").append(getLanguageName(targetLanguage)).append(":\n\n");
+        }
+        
+        prompt.append(text);
+        
+        return prompt.toString();
+    }
+
+    private String getLanguageName(String languageCode) {
+        Map<String, String> languageNames = Map.of(
+            "en", "English",
+            "es", "Spanish", 
+            "fr", "French",
+            "de", "German",
+            "it", "Italian",
+            "pt", "Portuguese",
+            "ru", "Russian",
+            "ja", "Japanese",
+            "ko", "Korean",
+            "zh", "Chinese",
+            "ar", "Arabic",
+            "hi", "Hindi"
+        );
+        
+        return languageNames.getOrDefault(languageCode, languageCode);
     }
 
     @PreDestroy
     public void cleanup() {
-        log.info("Cleaning up OpenAI Translation Service");
-        translationSessions.clear();
+        log.info("Shutting down OpenAI Translation Service");
         
-        scheduler.shutdown();
         try {
-            if (!scheduler.awaitTermination(5, TimeUnit.SECONDS)) {
-                scheduler.shutdownNow();
+            executorService.shutdown();
+            if (!executorService.awaitTermination(10, TimeUnit.SECONDS)) {
+                executorService.shutdownNow();
             }
         } catch (InterruptedException e) {
-            scheduler.shutdownNow();
+            executorService.shutdownNow();
             Thread.currentThread().interrupt();
         }
-    }
-
-    /**
-     * Translation session data class
-     */
-    private static class TranslationSession {
-        private final String conferenceName;
-        private final String sourceLanguage;
-        private final String targetLanguage;
-
-        public TranslationSession(String conferenceName, String sourceLanguage, String targetLanguage) {
-            this.conferenceName = conferenceName;
-            this.sourceLanguage = sourceLanguage;
-            this.targetLanguage = targetLanguage;
+        
+        try {
+            if (httpClient != null) {
+                httpClient.close();
+            }
+        } catch (IOException e) {
+            log.error("Error closing HTTP client: {}", e.getMessage());
         }
-
-        public String getConferenceName() { return conferenceName; }
-        public String getSourceLanguage() { return sourceLanguage; }
-        public String getTargetLanguage() { return targetLanguage; }
+        
+        log.info("OpenAI Translation Service shutdown completed");
     }
 }
