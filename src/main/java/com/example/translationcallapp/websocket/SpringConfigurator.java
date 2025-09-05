@@ -7,8 +7,8 @@ import org.springframework.context.ApplicationContextAware;
 import org.springframework.stereotype.Component;
 
 import jakarta.websocket.server.ServerEndpointConfig;
-import jakarta.websocket.HandshakeRequest;
 import jakarta.websocket.server.HandshakeRequest;
+import jakarta.websocket.server.HandshakeResponse;
 
 /**
  * Configurator for WebSocket endpoints that enables Spring dependency injection
@@ -34,25 +34,25 @@ public class SpringConfigurator extends ServerEndpointConfig.Configurator implem
      * This can be used for authentication, CORS, or other security measures.
      */
     @Override
-    public void modifyHandshake(ServerEndpointConfig sec, 
-                              HandshakeRequest request, 
-                              jakarta.websocket.server.HandshakeResponse response) {
+    public void modifyHandshake(ServerEndpointConfig sec,
+                               HandshakeRequest request,
+                               HandshakeResponse response) {
         // Add any custom handshake logic here
         // For example, authentication, CORS headers, etc.
-        
+
         // Store HTTP session in WebSocket session if needed
-        jakarta.servlet.http.HttpSession httpSession = 
-            (jakarta.servlet.http.HttpSession) request.getHttpSession();
+        jakarta.servlet.http.HttpSession httpSession =
+                (jakarta.servlet.http.HttpSession) request.getHttpSession();
         if (httpSession != null) {
             sec.getUserProperties().put("httpSession", httpSession);
         }
-        
+
         // Store request headers for potential use
         sec.getUserProperties().put("headers", request.getHeaders());
-        
+
         // Store remote address
-        sec.getUserProperties().put("remoteAddress", 
-            request.getHeaders().get("x-forwarded-for"));
+        sec.getUserProperties().put("remoteAddress",
+                request.getHeaders().get("x-forwarded-for"));
     }
 
     /**
@@ -64,22 +64,14 @@ public class SpringConfigurator extends ServerEndpointConfig.Configurator implem
         // In production, you should validate against allowed origins
         // For now, allowing all origins for development
         return true;
-        
-        // Production example:
-        // List<String> allowedOrigins = Arrays.asList(
-        //     "https://yourdomain.com",
-        //     "https://www.yourdomain.com",
-        //     "https://app.yourdomain.com"
-        // );
-        // return allowedOrigins.contains(originHeaderValue);
     }
 
     /**
      * Allows modification of the subprotocol selection process.
      */
     @Override
-    public String getNegotiatedSubprotocol(java.util.List<String> supported, 
-                                         java.util.List<String> requested) {
+    public String getNegotiatedSubprotocol(java.util.List<String> supported,
+                                           java.util.List<String> requested) {
         // Return the first matching subprotocol
         for (String requestedProtocol : requested) {
             if (supported.contains(requestedProtocol)) {
@@ -94,7 +86,7 @@ public class SpringConfigurator extends ServerEndpointConfig.Configurator implem
      */
     @Override
     public java.util.List<jakarta.websocket.Extension> getNegotiatedExtensions(
-            java.util.List<jakarta.websocket.Extension> installed, 
+            java.util.List<jakarta.websocket.Extension> installed,
             java.util.List<jakarta.websocket.Extension> requested) {
         // Return negotiated extensions
         return new java.util.ArrayList<>();

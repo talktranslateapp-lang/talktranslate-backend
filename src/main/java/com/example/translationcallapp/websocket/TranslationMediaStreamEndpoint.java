@@ -11,7 +11,9 @@ import jakarta.websocket.*;
 import jakarta.websocket.server.PathParam;
 import jakarta.websocket.server.ServerEndpoint;
 import java.io.IOException;
+import java.io.ByteArrayOutputStream; // <-- Add this import
 import java.util.Base64;
+import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
@@ -32,44 +34,36 @@ public class TranslationMediaStreamEndpoint {
     private final ConcurrentHashMap<String, MediaSession> activeSessions = new ConcurrentHashMap<>();
     private final ExecutorService translationExecutor = Executors.newCachedThreadPool();
 
-    /**
-     * WebSocket connection opened with language parameters
-     */
     @OnOpen
-    public void onOpen(Session session, 
+    public void onOpen(Session session,
                       @PathParam("fromLang") String fromLanguage,
                       @PathParam("toLang") String toLanguage) {
-        
+
         String sessionId = session.getId();
         MediaSession mediaSession = new MediaSession(session, fromLanguage, toLanguage);
         activeSessions.put(sessionId, mediaSession);
-        
-        log.info("Translation stream opened: {} -> {} (Session: {})", 
+
+        log.info("Translation stream opened: {} -> {} (Session: {})",
                 fromLanguage, toLanguage, sessionId);
-        
-        // Store language preferences in session
+
         session.getUserProperties().put("fromLanguage", fromLanguage);
         session.getUserProperties().put("toLanguage", toLanguage);
-        
-        // Send connection acknowledgment
+
         sendMessage(session, createConnectionAck(fromLanguage, toLanguage));
     }
 
-    /**
-     * Handle incoming WebSocket messages
-     */
     @OnMessage
     public void onMessage(String message, Session session) {
         try {
             JsonNode messageNode = objectMapper.readTree(message);
             String event = messageNode.get("event").asText();
-            
+
             MediaSession mediaSession = activeSessions.get(session.getId());
             if (mediaSession == null) {
                 log.warn("No media session found for WebSocket session: {}", session.getId());
                 return;
             }
-            
+
             switch (event) {
                 case "connected":
                     handleConnectedEvent(messageNode, mediaSession);
@@ -94,161 +88,123 @@ public class TranslationMediaStreamEndpoint {
         }
     }
 
-    /**
-     * Handle WebSocket errors
-     */
     @OnError
     public void onError(Session session, Throwable throwable) {
         log.error("WebSocket error for translation session: {}", session.getId(), throwable);
     }
 
-    /**
-     * Handle WebSocket connection close
-     */
     @OnClose
     public void onClose(Session session, CloseReason closeReason) {
         String sessionId = session.getId();
         MediaSession mediaSession = activeSessions.remove(sessionId);
-        
+
         if (mediaSession != null) {
             mediaSession.cleanup();
-            log.info("Translation stream closed: {} -> {} (Session: {}) - Reason: {}", 
+            log.info("Translation stream closed: {} -> {} (Session: {}) - Reason: {}",
                     mediaSession.getFromLanguage(), mediaSession.getToLanguage(),
                     sessionId, closeReason.getReasonPhrase());
         }
     }
 
-    /**
-     * Handle connection establishment
-     */
     private void handleConnectedEvent(JsonNode messageNode, MediaSession mediaSession) {
         log.info("Translation service connected for session: {}", mediaSession.getSessionId());
-        
-        // Initialize translation pipeline
         mediaSession.initializeTranslationPipeline();
     }
 
-    /**
-     * Handle stream start event
-     */
     private void handleStartEvent(JsonNode messageNode, MediaSession mediaSession) {
         JsonNode start = messageNode.get("start");
         String streamSid = start.get("streamSid").asText();
         String callSid = start.get("callSid").asText();
-        
+
         mediaSession.setStreamMetadata(streamSid, callSid);
-        
-        log.info("Translation stream started - Stream: {}, Call: {}, Languages: {} -> {}", 
-                streamSid, callSid, 
+
+        log.info("Translation stream started - Stream: {}, Call: {}, Languages: {} -> {}",
+                streamSid, callSid,
                 mediaSession.getFromLanguage(), mediaSession.getToLanguage());
     }
 
-    /**
-     * Handle incoming audio media
-     */
     private void handleMediaEvent(JsonNode messageNode, MediaSession mediaSession) {
         try {
             JsonNode media = messageNode.get("media");
             String payload = media.get("payload").asText();
             long timestamp = media.get("timestamp").asLong();
-            
-            // Decode audio data
+
             byte[] audioData = Base64.getDecoder().decode(payload);
-            
-            // Process audio asynchronously to avoid blocking WebSocket thread
-            translationExecutor.submit(() -> 
+
+            translationExecutor.submit(() ->
                 processAudioForTranslation(audioData, timestamp, mediaSession));
-            
+
         } catch (Exception e) {
-            log.error("Error handling media event for session {}: ", 
+            log.error("Error handling media event for session {}: ",
                      mediaSession.getSessionId(), e);
         }
     }
 
-    /**
-     * Handle stream stop event
-     */
     private void handleStopEvent(JsonNode messageNode, MediaSession mediaSession) {
         log.info("Translation stream stopping for session: {}", mediaSession.getSessionId());
         mediaSession.stopTranslation();
     }
 
-    /**
-     * Handle configuration updates
-     */
     private void handleConfigurationEvent(JsonNode messageNode, MediaSession mediaSession) {
         JsonNode config = messageNode.get("configuration");
-        
+
         if (config.has("qualityLevel")) {
             String quality = config.get("qualityLevel").asText();
             mediaSession.setQualityLevel(quality);
-            log.debug("Updated quality level to {} for session: {}", 
+            log.debug("Updated quality level to {} for session: {}",
                      quality, mediaSession.getSessionId());
         }
-        
+
         if (config.has("translationMode")) {
             String mode = config.get("translationMode").asText();
             mediaSession.setTranslationMode(mode);
-            log.debug("Updated translation mode to {} for session: {}", 
+            log.debug("Updated translation mode to {} for session: {}",
                      mode, mediaSession.getSessionId());
         }
     }
 
-    /**
-     * Process audio data for translation
-     */
-    private void processAudioForTranslation(byte[] audioData, long timestamp, 
+    private void processAudioForTranslation(byte[] audioData, long timestamp,
                                           MediaSession mediaSession) {
         try {
-            // Add audio to session buffer
             mediaSession.addAudioData(audioData, timestamp);
-            
-            // Check if we have enough audio data to process
+
             if (mediaSession.hasEnoughAudioForProcessing()) {
                 byte[] audioChunk = mediaSession.getAudioChunkForProcessing();
-                
-                // Perform translation
+
                 String fromLang = mediaSession.getFromLanguage();
                 String toLang = mediaSession.getToLanguage();
-                
-                // Step 1: Speech to Text
+
                 String transcribedText = translationService.speechToText(audioChunk, fromLang);
-                
+
                 if (transcribedText != null && !transcribedText.trim().isEmpty()) {
                     log.debug("Transcribed: {} ({})", transcribedText, fromLang);
-                    
-                    // Step 2: Translate Text
+
                     String translatedText = translationService.translateText(
                         transcribedText, fromLang, toLang);
-                    
+
                     if (translatedText != null && !translatedText.trim().isEmpty()) {
                         log.debug("Translated: {} ({})", translatedText, toLang);
-                        
-                        // Step 3: Text to Speech
+
                         byte[] translatedAudio = translationService.textToSpeech(
                             translatedText, toLang);
-                        
+
                         if (translatedAudio != null && translatedAudio.length > 0) {
-                            // Send translated audio back through WebSocket
                             sendTranslatedAudio(mediaSession, translatedAudio);
                         }
                     }
                 }
             }
-            
+
         } catch (Exception e) {
-            log.error("Error processing audio for translation in session {}: ", 
+            log.error("Error processing audio for translation in session {}: ",
                      mediaSession.getSessionId(), e);
         }
     }
 
-    /**
-     * Send translated audio back to the client
-     */
     private void sendTranslatedAudio(MediaSession mediaSession, byte[] translatedAudio) {
         try {
             String base64Audio = Base64.getEncoder().encodeToString(translatedAudio);
-            
+
             String mediaMessage = objectMapper.writeValueAsString(Map.of(
                 "event", "translatedMedia",
                 "streamSid", mediaSession.getStreamSid(),
@@ -258,18 +214,15 @@ public class TranslationMediaStreamEndpoint {
                     "language", mediaSession.getToLanguage()
                 )
             ));
-            
+
             sendMessage(mediaSession.getSession(), mediaMessage);
-            
+
         } catch (Exception e) {
-            log.error("Error sending translated audio for session {}: ", 
+            log.error("Error sending translated audio for session {}: ",
                      mediaSession.getSessionId(), e);
         }
     }
 
-    /**
-     * Send message to WebSocket session
-     */
     private void sendMessage(Session session, String message) {
         try {
             if (session.isOpen()) {
@@ -280,9 +233,6 @@ public class TranslationMediaStreamEndpoint {
         }
     }
 
-    /**
-     * Create connection acknowledgment message
-     */
     private String createConnectionAck(String fromLang, String toLang) {
         try {
             return objectMapper.writeValueAsString(Map.of(
@@ -298,9 +248,6 @@ public class TranslationMediaStreamEndpoint {
         }
     }
 
-    /**
-     * Get statistics for monitoring
-     */
     public TranslationStats getStats() {
         return new TranslationStats(
             activeSessions.size(),
@@ -310,16 +257,10 @@ public class TranslationMediaStreamEndpoint {
         );
     }
 
-    /**
-     * Shutdown executor service
-     */
     public void shutdown() {
         translationExecutor.shutdown();
     }
 
-    /**
-     * Inner class to manage individual translation sessions
-     */
     private static class MediaSession {
         private final Session session;
         private final String fromLanguage;
@@ -328,8 +269,7 @@ public class TranslationMediaStreamEndpoint {
         private String callSid;
         private String qualityLevel = "standard";
         private String translationMode = "realtime";
-        
-        // Audio processing
+
         private final ByteArrayOutputStream audioBuffer = new ByteArrayOutputStream();
         private long lastProcessedTimestamp = 0;
         private long processedAudioDuration = 0;
@@ -346,7 +286,6 @@ public class TranslationMediaStreamEndpoint {
         }
 
         public void initializeTranslationPipeline() {
-            // Initialize any required translation resources
             log.debug("Initializing translation pipeline for {} -> {}", fromLanguage, toLanguage);
         }
 
@@ -362,7 +301,6 @@ public class TranslationMediaStreamEndpoint {
         }
 
         public boolean hasEnoughAudioForProcessing() {
-            // Check if we have at least 1 second of audio (assuming 8kHz, 16-bit mono)
             return audioBuffer.size() >= 16000; // ~1 second of audio
         }
 
@@ -385,7 +323,6 @@ public class TranslationMediaStreamEndpoint {
             stopTranslation();
         }
 
-        // Getters
         public Session getSession() { return session; }
         public String getSessionId() { return session.getId(); }
         public String getFromLanguage() { return fromLanguage; }
@@ -394,14 +331,10 @@ public class TranslationMediaStreamEndpoint {
         public String getCallSid() { return callSid; }
         public long getProcessedAudioDuration() { return processedAudioDuration; }
 
-        // Setters
         public void setQualityLevel(String qualityLevel) { this.qualityLevel = qualityLevel; }
         public void setTranslationMode(String translationMode) { this.translationMode = translationMode; }
     }
 
-    /**
-     * Statistics class for monitoring
-     */
     public static class TranslationStats {
         private final int activeSessions;
         private final long totalProcessedAudio;
