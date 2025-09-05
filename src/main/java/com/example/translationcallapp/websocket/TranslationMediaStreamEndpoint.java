@@ -1,569 +1,417 @@
 package com.example.translationcallapp.websocket;
 
 import com.example.translationcallapp.service.OpenAITranslationService;
-import com.example.translationcallapp.service.AudioFormatConversionService;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.beans.factory.annotation.Autowired;
-import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Component;
 
-import javax.websocket.*;
-import javax.websocket.server.PathParam;
-import javax.websocket.server.ServerEndpoint;
+import jakarta.websocket.*;
+import jakarta.websocket.server.PathParam;
+import jakarta.websocket.server.ServerEndpoint;
+import java.io.IOException;
+import java.util.Base64;
 import java.util.concurrent.ConcurrentHashMap;
-import java.util.concurrent.atomic.AtomicInteger;
-import java.util.concurrent.atomic.AtomicLong;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
 
-@Component
-@ServerEndpoint(
-    value = "/media-stream/{conferenceName}", 
-    configurator = SpringConfigurator.class
-)
+/**
+ * WebSocket endpoint for handling translation-specific media streams
+ * Supports bidirectional translation between specified languages
+ */
 @Slf4j
+@Component
+@ServerEndpoint(value = "/translation/{fromLang}/{toLang}", configurator = SpringConfigurator.class)
 public class TranslationMediaStreamEndpoint {
 
     @Autowired
-    private OpenAITranslationService openAITranslationService;
+    private OpenAITranslationService translationService;
 
-    @Autowired
-    private AudioFormatConversionService audioConversionService;
-
-    @Autowired
-    private ObjectMapper objectMapper;
-
-    @Value("${media.stream.max.queue.size:10}")
-    private int maxQueueSize;
-
-    @Value("${translation.default.source.language:en-US}")
-    private String defaultSourceLanguage;
-
-    @Value("${translation.default.target.language:es-ES}")
-    private String defaultTargetLanguage;
-
-    @Value("${media.stream.processing.chunk-size:320}")
-    private int audioChunkSize;
-    
-    // Track active sessions by WebSocket session ID
+    private final ObjectMapper objectMapper = new ObjectMapper();
     private final ConcurrentHashMap<String, MediaSession> activeSessions = new ConcurrentHashMap<>();
-    
-    // Track processing queue to prevent overload
-    private final ConcurrentHashMap<String, AtomicInteger> processingQueues = new ConcurrentHashMap<>();
-    
-    // Enhanced monitoring metrics
-    private final AtomicLong totalSessionsCreated = new AtomicLong(0);
-    private final AtomicLong totalAudioPacketsReceived = new AtomicLong(0);
-    private final AtomicLong totalAudioPacketsDropped = new AtomicLong(0);
-    private final AtomicLong totalTranslationRequests = new AtomicLong(0);
+    private final ExecutorService translationExecutor = Executors.newCachedThreadPool();
 
+    /**
+     * WebSocket connection opened with language parameters
+     */
     @OnOpen
-    public void onOpen(Session session, @PathParam("conferenceName") String conferenceName) {
-        try {
-            log.info("Media stream WebSocket opened for conference: {}", conferenceName);
-            
-            // Validate conference name
-            if (!isValidConferenceName(conferenceName)) {
-                log.warn("Invalid conference name: {}", conferenceName);
-                session.close(new CloseReason(CloseReason.CloseCodes.CANNOT_ACCEPT, "Invalid conference name"));
-                return;
-            }
-            
-            MediaSession mediaSession = new MediaSession(session, conferenceName);
-            activeSessions.put(session.getId(), mediaSession);
-            processingQueues.put(session.getId(), new AtomicInteger(0));
-            totalSessionsCreated.incrementAndGet();
-            
-            log.info("Active media sessions: {}, Total created: {}", 
-                    activeSessions.size(), totalSessionsCreated.get());
-            
-        } catch (Exception e) {
-            log.error("Error opening media stream session for conference: {}", conferenceName, e);
-            try {
-                session.close(new CloseReason(CloseReason.CloseCodes.UNEXPECTED_CONDITION, "Setup error"));
-            } catch (Exception closeException) {
-                log.error("Failed to close session after setup error", closeException);
-            }
-        }
+    public void onOpen(Session session, 
+                      @PathParam("fromLang") String fromLanguage,
+                      @PathParam("toLang") String toLanguage) {
+        
+        String sessionId = session.getId();
+        MediaSession mediaSession = new MediaSession(session, fromLanguage, toLanguage);
+        activeSessions.put(sessionId, mediaSession);
+        
+        log.info("Translation stream opened: {} -> {} (Session: {})", 
+                fromLanguage, toLanguage, sessionId);
+        
+        // Store language preferences in session
+        session.getUserProperties().put("fromLanguage", fromLanguage);
+        session.getUserProperties().put("toLanguage", toLanguage);
+        
+        // Send connection acknowledgment
+        sendMessage(session, createConnectionAck(fromLanguage, toLanguage));
     }
 
+    /**
+     * Handle incoming WebSocket messages
+     */
     @OnMessage
     public void onMessage(String message, Session session) {
         try {
+            JsonNode messageNode = objectMapper.readTree(message);
+            String event = messageNode.get("event").asText();
+            
             MediaSession mediaSession = activeSessions.get(session.getId());
             if (mediaSession == null) {
-                log.warn("No media session found for session ID: {}", session.getId());
+                log.warn("No media session found for WebSocket session: {}", session.getId());
                 return;
             }
-
-            JsonNode event = objectMapper.readTree(message);
-            String eventType = event.has("event") ? event.get("event").asText() : null;
-
-            if (eventType == null) {
-                log.warn("Received event without 'event' field for conference: {}", 
-                        mediaSession.getConferenceName());
-                return;
-            }
-
-            switch (eventType) {
+            
+            switch (event) {
                 case "connected":
-                    handleConnected(event, mediaSession);
+                    handleConnectedEvent(messageNode, mediaSession);
                     break;
-                    
                 case "start":
-                    handleStart(event, mediaSession);
+                    handleStartEvent(messageNode, mediaSession);
                     break;
-                    
                 case "media":
-                    handleMedia(event, mediaSession, session.getId());
+                    handleMediaEvent(messageNode, mediaSession);
                     break;
-                    
-                case "mark":
-                    handleMark(event, mediaSession);
-                    break;
-                    
                 case "stop":
-                    handleStop(event, mediaSession);
+                    handleStopEvent(messageNode, mediaSession);
                     break;
-                    
+                case "configuration":
+                    handleConfigurationEvent(messageNode, mediaSession);
+                    break;
                 default:
-                    log.debug("Unhandled media stream event: {} for conference: {}", 
-                             eventType, mediaSession.getConferenceName());
-                    break;
+                    log.warn("Unknown event type: {} for session: {}", event, session.getId());
             }
-
         } catch (Exception e) {
-            MediaSession mediaSession = activeSessions.get(session.getId());
-            String conferenceName = mediaSession != null ? mediaSession.getConferenceName() : "unknown";
-            log.error("Error processing media stream message for conference: {}", conferenceName, e);
+            log.error("Error processing message for session {}: ", session.getId(), e);
         }
     }
 
+    /**
+     * Handle WebSocket errors
+     */
     @OnError
-    public void onError(Session session, Throwable error) {
-        MediaSession mediaSession = activeSessions.get(session.getId());
-        String conferenceName = mediaSession != null ? mediaSession.getConferenceName() : "unknown";
-        log.error("Media stream WebSocket error for conference: {}", conferenceName, error);
+    public void onError(Session session, Throwable throwable) {
+        log.error("WebSocket error for translation session: {}", session.getId(), throwable);
     }
 
+    /**
+     * Handle WebSocket connection close
+     */
     @OnClose
     public void onClose(Session session, CloseReason closeReason) {
-        try {
-            MediaSession mediaSession = activeSessions.remove(session.getId());
-            processingQueues.remove(session.getId());
-            
-            if (mediaSession != null) {
-                log.info("Media stream WebSocket closed for conference: {}, reason: {}, packets processed: {}", 
-                        mediaSession.getConferenceName(), closeReason, mediaSession.getPacketsProcessed());
-                log.info("Active media sessions: {}", activeSessions.size());
-            }
-            
-        } catch (Exception e) {
-            log.error("Error closing media stream session", e);
+        String sessionId = session.getId();
+        MediaSession mediaSession = activeSessions.remove(sessionId);
+        
+        if (mediaSession != null) {
+            mediaSession.cleanup();
+            log.info("Translation stream closed: {} -> {} (Session: {}) - Reason: {}", 
+                    mediaSession.getFromLanguage(), mediaSession.getToLanguage(),
+                    sessionId, closeReason.getReasonPhrase());
         }
     }
 
     /**
-     * Handle WebSocket connected event
+     * Handle connection establishment
      */
-    private void handleConnected(JsonNode event, MediaSession mediaSession) {
-        try {
-            String protocol = event.has("protocol") ? event.get("protocol").asText() : "unknown";
-            String version = event.has("version") ? event.get("version").asText() : "unknown";
-            
-            log.info("Media stream connected - Conference: {}, Protocol: {}, Version: {}", 
-                    mediaSession.getConferenceName(), protocol, version);
-                    
-        } catch (Exception e) {
-            log.error("Error handling connected event for conference: {}", 
-                     mediaSession.getConferenceName(), e);
-        }
+    private void handleConnectedEvent(JsonNode messageNode, MediaSession mediaSession) {
+        log.info("Translation service connected for session: {}", mediaSession.getSessionId());
+        
+        // Initialize translation pipeline
+        mediaSession.initializeTranslationPipeline();
     }
 
     /**
-     * Handle stream start event with enhanced participant mapping
+     * Handle stream start event
      */
-    private void handleStart(JsonNode event, MediaSession mediaSession) {
-        try {
-            String streamSid = event.has("streamSid") ? event.get("streamSid").asText() : null;
-            String callSid = event.has("callSid") ? event.get("callSid").asText() : null;
-            String tracks = event.has("tracks") ? event.get("tracks").toString() : "none";
-            
-            mediaSession.setStreamSid(streamSid);
-            mediaSession.setCallSid(callSid);
-            
-            log.info("Media stream started - Conference: {}, StreamSID: {}, CallSID: {}, Tracks: {}", 
-                    mediaSession.getConferenceName(), streamSid, callSid, tracks);
-
-            // Get languages from query parameters or use defaults
-            String sourceLanguage = extractLanguageFromSession(mediaSession, "source", defaultSourceLanguage);
-            String targetLanguage = extractLanguageFromSession(mediaSession, "target", defaultTargetLanguage);
-
-            // Initialize translation for this conference if not already active
-            if (!openAITranslationService.isTranslationActive(mediaSession.getConferenceName())) {
-                boolean started = openAITranslationService.startTranslation(
-                    mediaSession.getConferenceName(), 
-                    sourceLanguage, 
-                    targetLanguage
-                );
-                
-                if (started) {
-                    log.info("Translation started for conference: {} ({} -> {})", 
-                            mediaSession.getConferenceName(), sourceLanguage, targetLanguage);
-                    mediaSession.setTranslationActive(true);
-                } else {
-                    log.warn("Failed to start translation for conference: {}", 
-                            mediaSession.getConferenceName());
-                }
-            }
-            
-        } catch (Exception e) {
-            log.error("Error handling start event for conference: {}", 
-                     mediaSession.getConferenceName(), e);
-        }
+    private void handleStartEvent(JsonNode messageNode, MediaSession mediaSession) {
+        JsonNode start = messageNode.get("start");
+        String streamSid = start.get("streamSid").asText();
+        String callSid = start.get("callSid").asText();
+        
+        mediaSession.setStreamMetadata(streamSid, callSid);
+        
+        log.info("Translation stream started - Stream: {}, Call: {}, Languages: {} -> {}", 
+                streamSid, callSid, 
+                mediaSession.getFromLanguage(), mediaSession.getToLanguage());
     }
 
     /**
-     * Handle media (audio) event with enhanced processing
+     * Handle incoming audio media
      */
-    private void handleMedia(JsonNode event, MediaSession mediaSession, String sessionId) {
+    private void handleMediaEvent(JsonNode messageNode, MediaSession mediaSession) {
         try {
-            totalAudioPacketsReceived.incrementAndGet();
+            JsonNode media = messageNode.get("media");
+            String payload = media.get("payload").asText();
+            long timestamp = media.get("timestamp").asLong();
             
-            // Check processing queue to prevent overload
-            AtomicInteger queueSize = processingQueues.get(sessionId);
-            if (queueSize != null && queueSize.get() >= maxQueueSize) {
-                log.warn("Processing queue full ({}/{}) for conference: {}, dropping audio packet", 
-                        queueSize.get(), maxQueueSize, mediaSession.getConferenceName());
-                totalAudioPacketsDropped.incrementAndGet();
-                return;
-            }
-
-            JsonNode payload = event.get("payload");
-            if (payload == null) {
-                log.debug("Received media event without payload for conference: {}", 
-                         mediaSession.getConferenceName());
-                return;
-            }
-
-            // Enhanced null checks as recommended by Twilio
-            String track = payload.has("track") ? payload.get("track").asText() : null;
-            String chunk = payload.has("chunk") ? payload.get("chunk").asText() : null;
-            String timestamp = payload.has("timestamp") ? payload.get("timestamp").asText() : null;
-            String sequenceNumber = payload.has("sequenceNumber") ? payload.get("sequenceNumber").asText() : null;
-
-            if (track == null || chunk == null) {
-                log.debug("Media event missing required fields (track/chunk) for conference: {}", 
-                         mediaSession.getConferenceName());
-                return;
-            }
-
-            // Only process inbound audio (from participants to translation)
-            if (!"inbound".equals(track)) {
-                return;
-            }
-
-            if (chunk.isEmpty()) {
-                return;
-            }
-
-            // Validate audio data before processing
-            if (!audioConversionService.isValidAudioData(chunk)) {
-                log.debug("Invalid audio data received for conference: {}", 
-                         mediaSession.getConferenceName());
-                return;
-            }
-
-            // Enhanced participant determination
-            String participant = determineParticipant(mediaSession, payload);
-            mediaSession.incrementPacketsProcessed();
-
-            log.debug("Processing audio - Conference: {}, Track: {}, Participant: {}, Timestamp: {}, Seq: {}, Chunk size: {}", 
-                     mediaSession.getConferenceName(), track, participant, timestamp, sequenceNumber, chunk.length());
-
-            // Accumulate audio chunks for better translation quality
-            mediaSession.addAudioChunk(chunk);
-
-            // Process accumulated audio when we have enough data
-            if (mediaSession.shouldProcessAccumulatedAudio(audioChunkSize)) {
-                String accumulatedAudio = mediaSession.getAndClearAccumulatedAudio();
-                
-                // Increment queue counter
-                if (queueSize != null) {
-                    queueSize.incrementAndGet();
-                }
-
-                totalTranslationRequests.incrementAndGet();
-
-                // Process audio asynchronously
-                openAITranslationService.processAudioAsync(
-                    mediaSession.getConferenceName(), 
-                    participant, 
-                    accumulatedAudio,
-                    () -> {
-                        // Decrement queue counter when processing completes
-                        if (queueSize != null) {
-                            queueSize.decrementAndGet();
-                        }
-                    }
-                );
-            }
-
+            // Decode audio data
+            byte[] audioData = Base64.getDecoder().decode(payload);
+            
+            // Process audio asynchronously to avoid blocking WebSocket thread
+            translationExecutor.submit(() -> 
+                processAudioForTranslation(audioData, timestamp, mediaSession));
+            
         } catch (Exception e) {
-            log.error("Error handling media event for conference: {}", 
-                     mediaSession.getConferenceName(), e);
-        }
-    }
-
-    /**
-     * Handle mark event
-     */
-    private void handleMark(JsonNode event, MediaSession mediaSession) {
-        try {
-            String name = event.has("name") ? event.get("name").asText() : null;
-            log.debug("Received mark event - Conference: {}, Name: {}", 
-                     mediaSession.getConferenceName(), name);
-                     
-        } catch (Exception e) {
-            log.error("Error handling mark event for conference: {}", 
-                     mediaSession.getConferenceName(), e);
+            log.error("Error handling media event for session {}: ", 
+                     mediaSession.getSessionId(), e);
         }
     }
 
     /**
      * Handle stream stop event
      */
-    private void handleStop(JsonNode event, MediaSession mediaSession) {
-        try {
-            log.info("Media stream stopped for conference: {}", mediaSession.getConferenceName());
-            
-            // Process any remaining accumulated audio
-            String remainingAudio = mediaSession.getAndClearAccumulatedAudio();
-            if (remainingAudio != null && !remainingAudio.isEmpty()) {
-                openAITranslationService.processAudio(
-                    mediaSession.getConferenceName(), 
-                    "caller", 
-                    remainingAudio
-                );
-            }
-            
-            // Stop translation for this conference
-            if (mediaSession.isTranslationActive()) {
-                boolean stopped = openAITranslationService.stopTranslation(mediaSession.getConferenceName());
-                if (stopped) {
-                    log.info("Translation stopped for conference: {}", mediaSession.getConferenceName());
-                    mediaSession.setTranslationActive(false);
-                }
-            }
-            
-        } catch (Exception e) {
-            log.error("Error handling stop event for conference: {}", 
-                     mediaSession.getConferenceName(), e);
+    private void handleStopEvent(JsonNode messageNode, MediaSession mediaSession) {
+        log.info("Translation stream stopping for session: {}", mediaSession.getSessionId());
+        mediaSession.stopTranslation();
+    }
+
+    /**
+     * Handle configuration updates
+     */
+    private void handleConfigurationEvent(JsonNode messageNode, MediaSession mediaSession) {
+        JsonNode config = messageNode.get("configuration");
+        
+        if (config.has("qualityLevel")) {
+            String quality = config.get("qualityLevel").asText();
+            mediaSession.setQualityLevel(quality);
+            log.debug("Updated quality level to {} for session: {}", 
+                     quality, mediaSession.getSessionId());
+        }
+        
+        if (config.has("translationMode")) {
+            String mode = config.get("translationMode").asText();
+            mediaSession.setTranslationMode(mode);
+            log.debug("Updated translation mode to {} for session: {}", 
+                     mode, mediaSession.getSessionId());
         }
     }
 
     /**
-     * Enhanced participant determination with better mapping
+     * Process audio data for translation
      */
-    private String determineParticipant(MediaSession mediaSession, JsonNode payload) {
+    private void processAudioForTranslation(byte[] audioData, long timestamp, 
+                                          MediaSession mediaSession) {
         try {
-            // Try to get participant info from payload if available
-            if (payload.has("participantSid")) {
-                String participantSid = payload.get("participantSid").asText();
-                return "participant-" + participantSid;
-            }
+            // Add audio to session buffer
+            mediaSession.addAudioData(audioData, timestamp);
             
-            // Try to correlate with call SID
-            if (payload.has("callSid") && mediaSession.getCallSid() != null) {
-                String payloadCallSid = payload.get("callSid").asText();
-                if (mediaSession.getCallSid().equals(payloadCallSid)) {
-                    return "caller";
-                }
-            }
-            
-            // Fallback to track-based determination
-            String track = payload.has("track") ? payload.get("track").asText() : "unknown";
-            return "inbound".equals(track) ? "caller" : "target";
-            
-        } catch (Exception e) {
-            log.warn("Error determining participant for conference: {}, using default", 
-                    mediaSession.getConferenceName(), e);
-            return "caller";
-        }
-    }
-
-    /**
-     * Extract language configuration from WebSocket session
-     */
-    private String extractLanguageFromSession(MediaSession mediaSession, String type, String defaultValue) {
-        try {
-            // Parse query parameters from WebSocket URI if available
-            Session session = mediaSession.getWebSocketSession();
-            if (session != null && session.getRequestURI() != null) {
-                String query = session.getRequestURI().getQuery();
-                if (query != null) {
-                    String[] params = query.split("&");
-                    for (String param : params) {
-                        String[] keyValue = param.split("=");
-                        if (keyValue.length == 2) {
-                            String key = keyValue[0];
-                            String value = keyValue[1];
-                            if ((type + "Language").equals(key) || (type + "_language").equals(key)) {
-                                return value;
-                            }
+            // Check if we have enough audio data to process
+            if (mediaSession.hasEnoughAudioForProcessing()) {
+                byte[] audioChunk = mediaSession.getAudioChunkForProcessing();
+                
+                // Perform translation
+                String fromLang = mediaSession.getFromLanguage();
+                String toLang = mediaSession.getToLanguage();
+                
+                // Step 1: Speech to Text
+                String transcribedText = translationService.speechToText(audioChunk, fromLang);
+                
+                if (transcribedText != null && !transcribedText.trim().isEmpty()) {
+                    log.debug("Transcribed: {} ({})", transcribedText, fromLang);
+                    
+                    // Step 2: Translate Text
+                    String translatedText = translationService.translateText(
+                        transcribedText, fromLang, toLang);
+                    
+                    if (translatedText != null && !translatedText.trim().isEmpty()) {
+                        log.debug("Translated: {} ({})", translatedText, toLang);
+                        
+                        // Step 3: Text to Speech
+                        byte[] translatedAudio = translationService.textToSpeech(
+                            translatedText, toLang);
+                        
+                        if (translatedAudio != null && translatedAudio.length > 0) {
+                            // Send translated audio back through WebSocket
+                            sendTranslatedAudio(mediaSession, translatedAudio);
                         }
                     }
                 }
             }
             
-            return defaultValue;
+        } catch (Exception e) {
+            log.error("Error processing audio for translation in session {}: ", 
+                     mediaSession.getSessionId(), e);
+        }
+    }
+
+    /**
+     * Send translated audio back to the client
+     */
+    private void sendTranslatedAudio(MediaSession mediaSession, byte[] translatedAudio) {
+        try {
+            String base64Audio = Base64.getEncoder().encodeToString(translatedAudio);
+            
+            String mediaMessage = objectMapper.writeValueAsString(Map.of(
+                "event", "translatedMedia",
+                "streamSid", mediaSession.getStreamSid(),
+                "timestamp", System.currentTimeMillis(),
+                "media", Map.of(
+                    "payload", base64Audio,
+                    "language", mediaSession.getToLanguage()
+                )
+            ));
+            
+            sendMessage(mediaSession.getSession(), mediaMessage);
             
         } catch (Exception e) {
-            log.warn("Error extracting {} language from session, using default: {}", 
-                    type, defaultValue, e);
-            return defaultValue;
+            log.error("Error sending translated audio for session {}: ", 
+                     mediaSession.getSessionId(), e);
         }
     }
 
     /**
-     * Validate conference name to prevent injection attacks
+     * Send message to WebSocket session
      */
-    private boolean isValidConferenceName(String conferenceName) {
-        if (conferenceName == null || conferenceName.trim().isEmpty()) {
-            return false;
+    private void sendMessage(Session session, String message) {
+        try {
+            if (session.isOpen()) {
+                session.getBasicRemote().sendText(message);
+            }
+        } catch (IOException e) {
+            log.error("Error sending message to session {}: ", session.getId(), e);
         }
-        
-        // Conference names should be alphanumeric with hyphens and underscores
-        return conferenceName.matches("^[a-zA-Z0-9-_]+$") && conferenceName.length() <= 100;
     }
 
     /**
-     * Get comprehensive monitoring statistics
+     * Create connection acknowledgment message
      */
-    public MediaStreamStats getStats() {
-        return new MediaStreamStats(
+    private String createConnectionAck(String fromLang, String toLang) {
+        try {
+            return objectMapper.writeValueAsString(Map.of(
+                "event", "connected",
+                "service", "translation",
+                "fromLanguage", fromLang,
+                "toLanguage", toLang,
+                "status", "ready"
+            ));
+        } catch (Exception e) {
+            log.error("Error creating connection ack: ", e);
+            return "{\"event\":\"connected\",\"status\":\"ready\"}";
+        }
+    }
+
+    /**
+     * Get statistics for monitoring
+     */
+    public TranslationStats getStats() {
+        return new TranslationStats(
             activeSessions.size(),
-            totalSessionsCreated.get(),
-            totalAudioPacketsReceived.get(),
-            totalAudioPacketsDropped.get(),
-            totalTranslationRequests.get(),
-            getTotalQueueSize(),
-            calculateDropRate()
+            activeSessions.values().stream()
+                .mapToLong(MediaSession::getProcessedAudioDuration)
+                .sum()
         );
     }
 
     /**
-     * Get active session count for monitoring
+     * Shutdown executor service
      */
-    public int getActiveSessionCount() {
-        return activeSessions.size();
+    public void shutdown() {
+        translationExecutor.shutdown();
     }
 
     /**
-     * Get processing queue status for monitoring
-     */
-    public int getTotalQueueSize() {
-        return processingQueues.values().stream()
-                .mapToInt(AtomicInteger::get)
-                .sum();
-    }
-
-    /**
-     * Calculate packet drop rate for monitoring
-     */
-    private double calculateDropRate() {
-        long total = totalAudioPacketsReceived.get();
-        if (total == 0) return 0.0;
-        
-        long dropped = totalAudioPacketsDropped.get();
-        return (dropped * 100.0) / total;
-    }
-
-    /**
-     * Enhanced media session data class
+     * Inner class to manage individual translation sessions
      */
     private static class MediaSession {
-        private final Session webSocketSession;
-        private final String conferenceName;
+        private final Session session;
+        private final String fromLanguage;
+        private final String toLanguage;
         private String streamSid;
         private String callSid;
-        private boolean translationActive = false;
-        private final AtomicLong packetsProcessed = new AtomicLong(0);
-        private final StringBuilder accumulatedAudio = new StringBuilder();
-        private final Object audioLock = new Object();
+        private String qualityLevel = "standard";
+        private String translationMode = "realtime";
+        
+        // Audio processing
+        private final ByteArrayOutputStream audioBuffer = new ByteArrayOutputStream();
+        private long lastProcessedTimestamp = 0;
+        private long processedAudioDuration = 0;
 
-        public MediaSession(Session webSocketSession, String conferenceName) {
-            this.webSocketSession = webSocketSession;
-            this.conferenceName = conferenceName;
+        public MediaSession(Session session, String fromLanguage, String toLanguage) {
+            this.session = session;
+            this.fromLanguage = fromLanguage;
+            this.toLanguage = toLanguage;
         }
 
-        public void addAudioChunk(String audioChunk) {
-            synchronized (audioLock) {
-                accumulatedAudio.append(audioChunk);
-            }
+        public void setStreamMetadata(String streamSid, String callSid) {
+            this.streamSid = streamSid;
+            this.callSid = callSid;
         }
 
-        public boolean shouldProcessAccumulatedAudio(int chunkSize) {
-            synchronized (audioLock) {
-                return accumulatedAudio.length() >= chunkSize;
-            }
+        public void initializeTranslationPipeline() {
+            // Initialize any required translation resources
+            log.debug("Initializing translation pipeline for {} -> {}", fromLanguage, toLanguage);
         }
 
-        public String getAndClearAccumulatedAudio() {
-            synchronized (audioLock) {
-                if (accumulatedAudio.length() == 0) {
-                    return null;
+        public void addAudioData(byte[] audioData, long timestamp) {
+            synchronized (audioBuffer) {
+                try {
+                    audioBuffer.write(audioData);
+                    lastProcessedTimestamp = timestamp;
+                } catch (IOException e) {
+                    log.error("Error adding audio data to buffer: ", e);
                 }
-                String audio = accumulatedAudio.toString();
-                accumulatedAudio.setLength(0);
-                return audio;
             }
         }
 
-        // Getters and setters
-        public Session getWebSocketSession() { return webSocketSession; }
-        public String getConferenceName() { return conferenceName; }
-        public String getStreamSid() { return streamSid; }
-        public void setStreamSid(String streamSid) { this.streamSid = streamSid; }
-        public String getCallSid() { return callSid; }
-        public void setCallSid(String callSid) { this.callSid = callSid; }
-        public boolean isTranslationActive() { return translationActive; }
-        public void setTranslationActive(boolean translationActive) { this.translationActive = translationActive; }
-        public long getPacketsProcessed() { return packetsProcessed.get(); }
-        public void incrementPacketsProcessed() { packetsProcessed.incrementAndGet(); }
-    }
+        public boolean hasEnoughAudioForProcessing() {
+            // Check if we have at least 1 second of audio (assuming 8kHz, 16-bit mono)
+            return audioBuffer.size() >= 16000; // ~1 second of audio
+        }
 
-    /**
-     * Enhanced media stream statistics DTO for monitoring
-     */
-    public static class MediaStreamStats {
-        private final int activeSessions;
-        private final long totalSessionsCreated;
-        private final long totalPacketsReceived;
-        private final long totalPacketsDropped;
-        private final long totalTranslationRequests;
-        private final int currentQueueSize;
-        private final double dropRate;
+        public byte[] getAudioChunkForProcessing() {
+            synchronized (audioBuffer) {
+                byte[] chunk = audioBuffer.toByteArray();
+                audioBuffer.reset();
+                processedAudioDuration += chunk.length;
+                return chunk;
+            }
+        }
 
-        public MediaStreamStats(int activeSessions, long totalSessionsCreated, 
-                               long totalPacketsReceived, long totalPacketsDropped,
-                               long totalTranslationRequests, int currentQueueSize, double dropRate) {
-            this.activeSessions = activeSessions;
-            this.totalSessionsCreated = totalSessionsCreated;
-            this.totalPacketsReceived = totalPacketsReceived;
-            this.totalPacketsDropped = totalPacketsDropped;
-            this.totalTranslationRequests = totalTranslationRequests;
-            this.currentQueueSize = currentQueueSize;
-            this.dropRate = dropRate;
+        public void stopTranslation() {
+            synchronized (audioBuffer) {
+                audioBuffer.reset();
+            }
+        }
+
+        public void cleanup() {
+            stopTranslation();
         }
 
         // Getters
+        public Session getSession() { return session; }
+        public String getSessionId() { return session.getId(); }
+        public String getFromLanguage() { return fromLanguage; }
+        public String getToLanguage() { return toLanguage; }
+        public String getStreamSid() { return streamSid; }
+        public String getCallSid() { return callSid; }
+        public long getProcessedAudioDuration() { return processedAudioDuration; }
+
+        // Setters
+        public void setQualityLevel(String qualityLevel) { this.qualityLevel = qualityLevel; }
+        public void setTranslationMode(String translationMode) { this.translationMode = translationMode; }
+    }
+
+    /**
+     * Statistics class for monitoring
+     */
+    public static class TranslationStats {
+        private final int activeSessions;
+        private final long totalProcessedAudio;
+
+        public TranslationStats(int activeSessions, long totalProcessedAudio) {
+            this.activeSessions = activeSessions;
+            this.totalProcessedAudio = totalProcessedAudio;
+        }
+
         public int getActiveSessions() { return activeSessions; }
-        public long getTotalSessionsCreated() { return totalSessionsCreated; }
-        public long getTotalPacketsReceived() { return totalPacketsReceived; }
-        public long getTotalPacketsDropped() { return totalPacketsDropped; }
-        public long getTotalTranslationRequests() { return totalTranslationRequests; }
-        public int getCurrentQueueSize() { return currentQueueSize; }
-        public double getDropRate() { return dropRate; }
+        public long getTotalProcessedAudio() { return totalProcessedAudio; }
     }
 }

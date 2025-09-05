@@ -7,268 +7,230 @@ import lombok.extern.slf4j.Slf4j;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.stereotype.Component;
 
-import javax.websocket.*;
-import javax.websocket.server.ServerEndpoint;
+import jakarta.websocket.*;
+import jakarta.websocket.server.ServerEndpoint;
 import java.io.IOException;
-import java.nio.ByteBuffer;
 import java.util.Base64;
 import java.util.concurrent.ConcurrentHashMap;
-import java.util.concurrent.ConcurrentMap;
 
+/**
+ * WebSocket endpoint for handling Twilio Media Streams
+ * Receives real-time audio data from Twilio and processes it for translation
+ */
 @Slf4j
 @Component
 @ServerEndpoint(value = "/media-stream", configurator = SpringConfigurator.class)
 public class TwilioMediaStreamEndpoint {
 
-    private static OpenAITranslationService translationService;
-    private static final ObjectMapper objectMapper = new ObjectMapper();
-    private static final ConcurrentMap<String, Session> sessions = new ConcurrentHashMap<>();
-    
-    // Audio processing buffers
-    private static final ConcurrentMap<String, StringBuilder> audioBuffers = new ConcurrentHashMap<>();
-    private static final int BUFFER_SIZE_THRESHOLD = 8000; // Adjust based on needs
-
     @Autowired
-    public void setTranslationService(OpenAITranslationService translationService) {
-        TwilioMediaStreamEndpoint.translationService = translationService;
-    }
+    private OpenAITranslationService translationService;
+
+    private final ObjectMapper objectMapper = new ObjectMapper();
+    private final ConcurrentHashMap<String, Session> activeSessions = new ConcurrentHashMap<>();
 
     @OnOpen
     public void onOpen(Session session) {
-        log.info("WebSocket connection opened: {}", session.getId());
-        sessions.put(session.getId(), session);
-        audioBuffers.put(session.getId(), new StringBuilder());
+        String sessionId = session.getId();
+        activeSessions.put(sessionId, session);
+        log.info("Media stream WebSocket opened for session: {}", sessionId);
         
-        // Send initial message to Twilio
-        sendMessage(session, createConnectedMessage());
+        // Send acknowledgment to Twilio
+        sendMessage(session, createAckMessage());
     }
 
     @OnMessage
     public void onMessage(String message, Session session) {
         try {
-            JsonNode jsonNode = objectMapper.readTree(message);
-            String event = jsonNode.get("event").asText();
-            
-            log.debug("Received event: {} for session: {}", event, session.getId());
+            JsonNode messageNode = objectMapper.readTree(message);
+            String event = messageNode.get("event").asText();
             
             switch (event) {
                 case "connected":
-                    handleConnected(jsonNode, session);
+                    handleConnectedEvent(messageNode, session);
                     break;
                 case "start":
-                    handleStart(jsonNode, session);
+                    handleStartEvent(messageNode, session);
                     break;
                 case "media":
-                    handleMedia(jsonNode, session);
+                    handleMediaEvent(messageNode, session);
                     break;
                 case "stop":
-                    handleStop(jsonNode, session);
+                    handleStopEvent(messageNode, session);
                     break;
                 default:
                     log.warn("Unknown event type: {}", event);
             }
         } catch (Exception e) {
-            log.error("Error processing message for session {}: {}", session.getId(), e.getMessage(), e);
+            log.error("Error processing message: ", e);
         }
     }
 
     @OnClose
     public void onClose(Session session, CloseReason closeReason) {
-        log.info("WebSocket connection closed: {} - Reason: {}", session.getId(), closeReason.getReasonPhrase());
-        cleanup(session);
+        String sessionId = session.getId();
+        activeSessions.remove(sessionId);
+        log.info("Media stream WebSocket closed for session: {} - Reason: {}", 
+                sessionId, closeReason.getReasonPhrase());
     }
 
     @OnError
     public void onError(Session session, Throwable throwable) {
-        log.error("WebSocket error for session {}: {}", session.getId(), throwable.getMessage(), throwable);
-        cleanup(session);
+        log.error("WebSocket error for session: {}", session.getId(), throwable);
     }
 
-    private void handleConnected(JsonNode jsonNode, Session session) {
-        log.info("Twilio connected for session: {}", session.getId());
-        // Protocol established
+    /**
+     * Handle the connected event from Twilio
+     */
+    private void handleConnectedEvent(JsonNode messageNode, Session session) {
+        log.info("Twilio Media Stream connected for session: {}", session.getId());
+        String protocol = messageNode.get("protocol").asText();
+        String version = messageNode.get("version").asText();
+        log.debug("Protocol: {}, Version: {}", protocol, version);
     }
 
-    private void handleStart(JsonNode jsonNode, Session session) {
-        log.info("Media stream started for session: {}", session.getId());
+    /**
+     * Handle the start event which contains stream metadata
+     */
+    private void handleStartEvent(JsonNode messageNode, Session session) {
+        JsonNode start = messageNode.get("start");
+        String streamSid = start.get("streamSid").asText();
+        String accountSid = start.get("accountSid").asText();
+        String callSid = start.get("callSid").asText();
         
-        // Extract stream metadata
-        JsonNode streamSid = jsonNode.get("streamSid");
-        JsonNode accountSid = jsonNode.get("accountSid");
-        JsonNode callSid = jsonNode.get("callSid");
+        log.info("Media stream started - Stream SID: {}, Call SID: {}", streamSid, callSid);
         
-        if (streamSid != null) {
-            log.info("Stream SID: {} for session: {}", streamSid.asText(), session.getId());
-        }
-        
-        // Initialize audio processing for this stream
-        audioBuffers.put(session.getId(), new StringBuilder());
+        // Store stream metadata in session
+        session.getUserProperties().put("streamSid", streamSid);
+        session.getUserProperties().put("callSid", callSid);
+        session.getUserProperties().put("accountSid", accountSid);
     }
 
-    private void handleMedia(JsonNode jsonNode, Session session) {
+    /**
+     * Handle incoming media (audio) data
+     */
+    private void handleMediaEvent(JsonNode messageNode, Session session) {
         try {
-            // Extract audio payload
-            String payload = jsonNode.get("media").get("payload").asText();
-            String track = jsonNode.get("media").get("track").asText();
+            JsonNode media = messageNode.get("media");
+            String payload = media.get("payload").asText();
             
-            // Only process inbound audio (from caller)
-            if ("inbound".equals(track)) {
-                processAudioData(payload, session);
-            }
+            // Decode base64 audio data
+            byte[] audioData = Base64.getDecoder().decode(payload);
+            
+            // Process audio for translation
+            processAudioForTranslation(audioData, session);
             
         } catch (Exception e) {
-            log.error("Error handling media for session {}: {}", session.getId(), e.getMessage(), e);
+            log.error("Error processing media event: ", e);
         }
     }
 
-    private void handleStop(JsonNode jsonNode, Session session) {
-        log.info("Media stream stopped for session: {}", session.getId());
+    /**
+     * Handle the stop event
+     */
+    private void handleStopEvent(JsonNode messageNode, Session session) {
+        String streamSid = (String) session.getUserProperties().get("streamSid");
+        log.info("Media stream stopped for Stream SID: {}", streamSid);
         
-        // Process any remaining audio in buffer
-        processRemainingAudio(session);
+        // Clean up any ongoing translation processes
+        cleanupTranslationSession(session);
+    }
+
+    /**
+     * Process audio data for translation
+     */
+    private void processAudioForTranslation(byte[] audioData, Session session) {
+        try {
+            // This would typically accumulate audio data until we have enough
+            // for processing, then send to OpenAI for speech-to-text
+            
+            String callSid = (String) session.getUserProperties().get("callSid");
+            
+            // For now, just log that we received audio data
+            log.debug("Received {} bytes of audio data for call: {}", audioData.length, callSid);
+            
+            // TODO: Implement actual translation pipeline:
+            // 1. Accumulate audio chunks
+            // 2. Send to OpenAI Speech-to-Text
+            // 3. Translate text
+            // 4. Convert back to speech
+            // 5. Send translated audio back to Twilio
+            
+        } catch (Exception e) {
+            log.error("Error processing audio for translation: ", e);
+        }
+    }
+
+    /**
+     * Send a message to the WebSocket session
+     */
+    private void sendMessage(Session session, String message) {
+        try {
+            if (session.isOpen()) {
+                session.getBasicRemote().sendText(message);
+            }
+        } catch (IOException e) {
+            log.error("Error sending message to session {}: ", session.getId(), e);
+        }
+    }
+
+    /**
+     * Create acknowledgment message for Twilio
+     */
+    private String createAckMessage() {
+        return "{\"event\":\"connected\",\"protocol\":\"Call\"}";
+    }
+
+    /**
+     * Clean up translation session resources
+     */
+    private void cleanupTranslationSession(Session session) {
+        String callSid = (String) session.getUserProperties().get("callSid");
+        log.info("Cleaning up translation session for call: {}", callSid);
         
-        // Clean up session-specific resources
-        cleanup(session);
+        // TODO: Stop any ongoing translation processes
+        // Clean up temporary files, close OpenAI connections, etc.
     }
 
-    private void processAudioData(String base64Payload, Session session) {
+    /**
+     * Send translated audio back to Twilio
+     */
+    private void sendTranslatedAudio(Session session, byte[] translatedAudioData) {
         try {
-            // Decode the base64 audio data
-            byte[] audioData = Base64.getDecoder().decode(base64Payload);
+            String base64Audio = Base64.getEncoder().encodeToString(translatedAudioData);
             
-            // Buffer the audio data
-            StringBuilder buffer = audioBuffers.get(session.getId());
-            if (buffer != null) {
-                buffer.append(base64Payload);
-                
-                // Process when buffer reaches threshold
-                if (buffer.length() >= BUFFER_SIZE_THRESHOLD) {
-                    processAudioBuffer(session);
-                }
-            }
-            
-        } catch (Exception e) {
-            log.error("Error processing audio data for session {}: {}", session.getId(), e.getMessage(), e);
-        }
-    }
-
-    private void processAudioBuffer(Session session) {
-        StringBuilder buffer = audioBuffers.get(session.getId());
-        if (buffer == null || buffer.length() == 0) {
-            return;
-        }
-
-        try {
-            String audioBase64 = buffer.toString();
-            
-            // Send to OpenAI for transcription and translation
-            if (translationService != null) {
-                translationService.processAudioStream(audioBase64, session.getId())
-                    .thenAccept(translatedText -> {
-                        if (translatedText != null && !translatedText.trim().isEmpty()) {
-                            // Send translated text back to Twilio
-                            sendTranslatedAudio(translatedText, session);
-                        }
-                    })
-                    .exceptionally(throwable -> {
-                        log.error("Error in translation service for session {}: {}", 
-                                session.getId(), throwable.getMessage(), throwable);
-                        return null;
-                    });
-            }
-            
-            // Clear the buffer
-            buffer.setLength(0);
-            
-        } catch (Exception e) {
-            log.error("Error processing audio buffer for session {}: {}", session.getId(), e.getMessage(), e);
-        }
-    }
-
-    private void processRemainingAudio(Session session) {
-        StringBuilder buffer = audioBuffers.get(session.getId());
-        if (buffer != null && buffer.length() > 0) {
-            log.info("Processing remaining audio buffer for session: {}", session.getId());
-            processAudioBuffer(session);
-        }
-    }
-
-    private void sendTranslatedAudio(String translatedText, Session session) {
-        try {
-            // Create TTS audio from translated text
-            if (translationService != null) {
-                translationService.textToSpeech(translatedText)
-                    .thenAccept(audioBase64 -> {
-                        if (audioBase64 != null) {
-                            // Send audio back to Twilio
-                            sendAudioToTwilio(audioBase64, session);
-                        }
-                    })
-                    .exceptionally(throwable -> {
-                        log.error("Error generating TTS for session {}: {}", 
-                                session.getId(), throwable.getMessage(), throwable);
-                        return null;
-                    });
-            }
-        } catch (Exception e) {
-            log.error("Error sending translated audio for session {}: {}", session.getId(), e.getMessage(), e);
-        }
-    }
-
-    private void sendAudioToTwilio(String audioBase64, Session session) {
-        try {
-            // Create media message to send back to Twilio
             String mediaMessage = String.format(
-                "{\"event\": \"media\", \"streamSid\": \"%s\", \"media\": {\"payload\": \"%s\"}}",
-                session.getId(), audioBase64
+                "{\"event\":\"media\",\"streamSid\":\"%s\",\"media\":{\"payload\":\"%s\"}}",
+                session.getUserProperties().get("streamSid"),
+                base64Audio
             );
             
             sendMessage(session, mediaMessage);
             
         } catch (Exception e) {
-            log.error("Error sending audio to Twilio for session {}: {}", session.getId(), e.getMessage(), e);
+            log.error("Error sending translated audio: ", e);
         }
     }
 
-    private void sendMessage(Session session, String message) {
-        try {
-            if (session != null && session.isOpen()) {
-                session.getBasicRemote().sendText(message);
-            }
-        } catch (IOException e) {
-            log.error("Error sending message to session {}: {}", session.getId(), e.getMessage(), e);
-        }
+    /**
+     * Get active session count for monitoring
+     */
+    public int getActiveSessionCount() {
+        return activeSessions.size();
     }
 
-    private String createConnectedMessage() {
-        return "{\"event\": \"connected\", \"protocol\": \"Call\"}";
-    }
-
-    private void cleanup(Session session) {
-        if (session != null) {
-            String sessionId = session.getId();
-            sessions.remove(sessionId);
-            audioBuffers.remove(sessionId);
-            
-            log.info("Cleaned up resources for session: {}", sessionId);
-        }
-    }
-
-    // Utility method to get active session count
-    public static int getActiveSessionCount() {
-        return sessions.size();
-    }
-
-    // Utility method to broadcast message to all sessions
-    public static void broadcastMessage(String message) {
-        sessions.values().forEach(session -> {
+    /**
+     * Close all active sessions (for shutdown)
+     */
+    public void closeAllSessions() {
+        activeSessions.values().forEach(session -> {
             try {
                 if (session.isOpen()) {
-                    session.getBasicRemote().sendText(message);
+                    session.close(new CloseReason(CloseReason.CloseCodes.GOING_AWAY, "Server shutdown"));
                 }
             } catch (IOException e) {
-                log.error("Error broadcasting message to session {}: {}", session.getId(), e.getMessage());
+                log.error("Error closing session: ", e);
             }
         });
+        activeSessions.clear();
     }
 }

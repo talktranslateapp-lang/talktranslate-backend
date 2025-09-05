@@ -2,10 +2,7 @@ package com.example.translationcallapp.config;
 
 import org.springframework.boot.context.properties.ConfigurationProperties;
 import org.springframework.stereotype.Component;
-import org.springframework.validation.annotation.Validated;
 
-import jakarta.validation.constraints.NotBlank;
-import jakarta.validation.constraints.Positive;
 import java.util.List;
 import java.util.Arrays;
 
@@ -15,19 +12,16 @@ import java.util.Arrays;
  */
 @Component
 @ConfigurationProperties(prefix = "app.audio.storage")
-@Validated
 public class AudioStorageProperties {
 
     /**
      * Base directory for storing audio files
      */
-    @NotBlank
     private String basePath = "./audio-files";
 
     /**
      * Maximum file size in bytes (default 10MB)
      */
-    @Positive
     private long maxFileSize = 10 * 1024 * 1024; // 10MB
 
     /**
@@ -38,13 +32,11 @@ public class AudioStorageProperties {
     /**
      * File retention duration in hours before cleanup
      */
-    @Positive
     private int retentionHours = 24;
 
     /**
      * Temporary directory for file processing
      */
-    @NotBlank
     private String tempPath = System.getProperty("java.io.tmpdir") + "/translation-audio-temp";
 
     /**
@@ -55,7 +47,6 @@ public class AudioStorageProperties {
     /**
      * Maximum filename length to prevent filesystem issues
      */
-    @Positive
     private int maxFilenameLength = 255;
 
     // Getters and Setters
