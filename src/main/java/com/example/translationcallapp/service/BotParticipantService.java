@@ -2,22 +2,29 @@ package com.example.translationcallapp.service;
 
 import com.twilio.Twilio;
 import com.twilio.rest.api.v2010.account.Call;
+import com.twilio.rest.api.v2010.account.Conference;
 import com.twilio.rest.api.v2010.account.conference.Participant;
-import com.twilio.rest.api.v2010.account.conference.ParticipantUpdater;
+import com.twilio.rest.api.v2010.account.conference.ParticipantCreator;
 import com.twilio.type.PhoneNumber;
-import com.twilio.base.ResourceSet;
-import lombok.extern.slf4j.Slf4j;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Service;
 
+import javax.crypto.Mac;
+import javax.crypto.spec.SecretKeySpec;
 import java.net.URI;
+import java.security.MessageDigest;
+import java.util.Base64;
 import java.util.List;
-import java.util.ArrayList;
-import java.util.stream.StreamSupport;
+import java.util.concurrent.TimeUnit;
 
-@Slf4j
 @Service
 public class BotParticipantService {
+
+    private static final Logger logger = LoggerFactory.getLogger(BotParticipantService.class);
+    private static final int MAX_RETRY_ATTEMPTS = 3;
+    private static final long RETRY_DELAY_MS = 1000;
 
     @Value("${twilio.account.sid}")
     private String twilioAccountSid;
@@ -31,240 +38,252 @@ public class BotParticipantService {
     @Value("${app.base.url}")
     private String baseUrl;
 
-    private static final String BOT_ENDPOINT_URL = "/webhook/bot";
+    private volatile boolean twilioInitialized = false;
 
-    private void initializeTwilio() {
-        if (twilioAccountSid != null && twilioAuthToken != null) {
-            Twilio.init(twilioAccountSid, twilioAuthToken);
-        }
-    }
-
-    /**
-     * Add bot to conference - 2 parameter version (matches CallController line 79)
-     */
-    public void addBot(String conferenceSid, String targetLanguage) {
-        log.info("Adding bot to conference {} with target language {}", conferenceSid, targetLanguage);
-        
-        try {
-            initializeTwilio();
-            
-            String botWebhookUrl = baseUrl + BOT_ENDPOINT_URL + 
-                "?conferenceSid=" + conferenceSid + 
-                "&targetLanguage=" + targetLanguage;
-
-            log.info("Creating bot call with webhook URL: {}", botWebhookUrl);
-
-            // Fixed: Use correct Twilio API signature with URI as third parameter
-            Call call = Call.creator(
-                new PhoneNumber(twilioPhoneNumber), // To (bot's "phone")
-                new PhoneNumber(twilioPhoneNumber), // From
-                URI.create(botWebhookUrl)           // Webhook URL as third parameter
-            ).create();
-
-            log.info("Created bot call {} for conference {}", call.getSid(), conferenceSid);
-
-        } catch (Exception e) {
-            log.error("Failed to add bot to conference {}: {}", conferenceSid, e.getMessage(), e);
-            throw new RuntimeException("Failed to add translation bot", e);
-        }
-    }
-
-    /**
-     * Add translation bot - 2 parameter version (matches CallController line 79)
-     */
-    public void addTranslationBot(String conferenceSid, String targetLanguage) {
-        addBot(conferenceSid, targetLanguage);
-    }
-
-    /**
-     * Add translation bot - 3 parameter version (matches CallController line 179)  
-     */
-    public void addTranslationBot(String conferenceSid, String targetLanguage, String sourceLanguage) {
-        log.info("Adding translation bot for conference {} - source: {}, target: {}", 
-            conferenceSid, sourceLanguage, targetLanguage);
-        
-        try {
-            initializeTwilio();
-            
-            String botWebhookUrl = baseUrl + BOT_ENDPOINT_URL + 
-                "?conferenceSid=" + conferenceSid + 
-                "&targetLanguage=" + targetLanguage +
-                "&sourceLanguage=" + sourceLanguage;
-
-            log.info("Creating bot call with webhook URL: {}", botWebhookUrl);
-
-            // Fixed: Use setUrl() method to properly set the webhook URL
-            Call call = Call.creator(
-                new PhoneNumber(twilioPhoneNumber), // To (bot's "phone")
-                new PhoneNumber(twilioPhoneNumber)  // From
-            ).setUrl(URI.create(botWebhookUrl))     // Webhook URL
-             .create();
-
-            log.info("Created bot call {} for conference {} with source {} and target {}", 
-                call.getSid(), conferenceSid, sourceLanguage, targetLanguage);
-
-        } catch (Exception e) {
-            log.error("Failed to add bot to conference {}: {}", conferenceSid, e.getMessage(), e);
-            throw new RuntimeException("Failed to add translation bot", e);
-        }
-    }
-
-    /**
-     * Remove bot by call SID
-     */
-    public void removeBotByCallSid(String callSid) {
-        log.info("Removing bot with call SID: {}", callSid);
-        
-        try {
-            initializeTwilio();
-            
-            // Update the call to completed status to hang up
-            Call call = Call.updater(callSid)
-                .setStatus(Call.UpdateStatus.COMPLETED)
-                .update();
-                
-            log.info("Successfully removed bot call: {}", callSid);
-            
-        } catch (Exception e) {
-            log.error("Failed to remove bot call {}: {}", callSid, e.getMessage(), e);
-        }
-    }
-
-    /**
-     * Remove bot - single parameter version (matches CallController line 113)
-     */
-    public void removeBot(String conferenceSid) {
-        removeAllBots(conferenceSid);
-    }
-
-    /**
-     * Remove all bots from a conference
-     */
-    public void removeAllBots(String conferenceSid) {
-        log.info("Removing all bots from conference: {}", conferenceSid);
-        
-        try {
-            initializeTwilio();
-            
-            // Get all participants in the conference
-            ResourceSet<Participant> participantSet = Participant.reader(conferenceSid).read();
-            
-            // Convert ResourceSet to List properly
-            List<Participant> participants = StreamSupport
-                .stream(participantSet.spliterator(), false)
-                .collect(ArrayList::new, (list, item) -> list.add(item), ArrayList::addAll);
-
-            // Remove participants that are bots (you may need to adjust this logic)
-            for (Participant participant : participants) {
-                String callSid = participant.getCallSid();
-                
-                // Check if this is a bot call (you may need to implement better bot detection logic)
-                if (isBotCall(callSid)) {
-                    try {
-                        // Use the deleter pattern for removing participants
-                        Participant.deleter(conferenceSid, callSid).delete();
-                        log.info("Removed bot participant with call SID: {}", callSid);
-                    } catch (Exception e) {
-                        log.error("Failed to remove bot participant {}: {}", callSid, e.getMessage());
-                    }
-                }
+    public synchronized void initializeTwilio() {
+        if (!twilioInitialized) {
+            if (twilioAccountSid == null || twilioAuthToken == null) {
+                logger.error("Twilio credentials not configured");
+                throw new RuntimeException("Twilio credentials not configured");
             }
-            
-        } catch (Exception e) {
-            log.error("Failed to remove bots from conference {}: {}", conferenceSid, e.getMessage(), e);
+            Twilio.init(twilioAccountSid, twilioAuthToken);
+            twilioInitialized = true;
+            logger.info("Twilio initialized successfully");
         }
+    }
+
+    /**
+     * Add a translation bot to a conference with retry logic
+     */
+    public String addTranslationBot(String conferenceSid, String sourceLanguage, String targetLanguage) {
+        return executeWithRetry(() -> {
+            initializeTwilio();
+            
+            // Generate secure webhook URL with timestamp and hash for security
+            String timestamp = String.valueOf(System.currentTimeMillis());
+            String secureToken = generateSecureToken(conferenceSid, timestamp);
+            
+            String botWebhookUrl = String.format("%s/webhook/bot?conferenceSid=%s&targetLanguage=%s&sourceLanguage=%s&timestamp=%s&token=%s",
+                baseUrl, conferenceSid, targetLanguage, sourceLanguage, timestamp, secureToken);
+            
+            logger.info("Adding translation bot for conference {} - source: {}, target: {}", 
+                conferenceSid, sourceLanguage, targetLanguage);
+            logger.debug("Bot webhook URL: {}", botWebhookUrl);
+
+            // Create the bot call using correct Twilio API
+            Call call = Call.creator(
+                new PhoneNumber(twilioPhoneNumber), // To
+                new PhoneNumber(twilioPhoneNumber), // From  
+                URI.create(botWebhookUrl)           // Webhook URL
+            )
+            .setStatusCallback(URI.create(baseUrl + "/webhook/call-status"))
+            .setStatusCallbackEvent("initiated ringing answered completed")
+            .setStatusCallbackMethod("POST")
+            .create();
+
+            logger.info("Translation bot call created with SID: {}", call.getSid());
+            return call.getSid();
+        });
+    }
+
+    /**
+     * Add a simple bot to conference (without translation)
+     */
+    public String addBot(String conferenceSid, String targetLanguage) {
+        return executeWithRetry(() -> {
+            initializeTwilio();
+            
+            String timestamp = String.valueOf(System.currentTimeMillis());
+            String secureToken = generateSecureToken(conferenceSid, timestamp);
+            
+            String botWebhookUrl = String.format("%s/webhook/bot?conferenceSid=%s&targetLanguage=%s&timestamp=%s&token=%s",
+                baseUrl, conferenceSid, targetLanguage, timestamp, secureToken);
+            
+            logger.info("Creating bot call for conference {} with target language {}", conferenceSid, targetLanguage);
+
+            Call call = Call.creator(
+                new PhoneNumber(twilioPhoneNumber),
+                new PhoneNumber(twilioPhoneNumber),
+                URI.create(botWebhookUrl)
+            )
+            .setStatusCallback(URI.create(baseUrl + "/webhook/call-status"))
+            .create();
+
+            logger.info("Bot call created successfully with SID: {}", call.getSid());
+            return call.getSid();
+        });
+    }
+
+    /**
+     * Add a regular participant to conference
+     */
+    public String addParticipantToConference(String conferenceSid, String phoneNumber) {
+        return executeWithRetry(() -> {
+            initializeTwilio();
+            
+            logger.info("Adding participant {} to conference {}", phoneNumber, conferenceSid);
+
+            // Create secure webhook URL for participant
+            String timestamp = String.valueOf(System.currentTimeMillis());
+            String secureToken = generateSecureToken(conferenceSid, timestamp);
+            String participantWebhookUrl = String.format("%s/webhook/participant?conferenceSid=%s&timestamp=%s&token=%s",
+                baseUrl, conferenceSid, timestamp, secureToken);
+
+            Call call = Call.creator(
+                new PhoneNumber(phoneNumber),        // To (participant's phone)
+                new PhoneNumber(twilioPhoneNumber),  // From (your Twilio number)
+                URI.create(participantWebhookUrl)    // Webhook URL
+            )
+            .setStatusCallback(URI.create(baseUrl + "/webhook/call-status"))
+            .create();
+
+            logger.info("Participant call created with SID: {} for phone {}", call.getSid(), phoneNumber);
+            return call.getSid();
+        });
+    }
+
+    /**
+     * Get conference information
+     */
+    public Conference getConferenceInfo(String conferenceSid) {
+        return executeWithRetry(() -> {
+            initializeTwilio();
+            
+            Conference conference = Conference.fetcher(conferenceSid).fetch();
+            logger.info("Conference {} status: {}, participants: {}", 
+                conferenceSid, conference.getStatus(), conference.getReasonConferenceEnded());
+            return conference;
+        });
+    }
+
+    /**
+     * Remove participant from conference
+     */
+    public void removeParticipantFromConference(String conferenceSid, String participantSid) {
+        executeWithRetry(() -> {
+            initializeTwilio();
+            
+            logger.info("Removing participant {} from conference {}", participantSid, conferenceSid);
+
+            // First mute the participant
+            Participant.updater(conferenceSid, participantSid)
+                .setMuted(true)
+                .update();
+
+            // Then remove them
+            Participant.deleter(conferenceSid, participantSid).delete();
+            logger.info("Participant {} removed from conference {}", participantSid, conferenceSid);
+            return null;
+        });
     }
 
     /**
      * Get all participants in a conference
      */
-    public List<Participant> getParticipants(String conferenceSid) {
-        try {
+    public List<Participant> getConferenceParticipants(String conferenceSid) {
+        return executeWithRetry(() -> {
             initializeTwilio();
             
-            ResourceSet<Participant> participantSet = Participant.reader(conferenceSid).read();
+            logger.info("Getting participants for conference {}", conferenceSid);
+            List<Participant> participants = Participant.reader(conferenceSid).read();
+            logger.info("Found {} participants in conference {}", participants.size(), conferenceSid);
             
-            // Convert ResourceSet to List properly
-            return StreamSupport
-                .stream(participantSet.spliterator(), false)
-                .collect(ArrayList::new, (list, item) -> list.add(item), ArrayList::addAll);
-                
+            return participants;
+        });
+    }
+
+    /**
+     * End conference by removing all participants
+     */
+    public void endConference(String conferenceSid) {
+        executeWithRetry(() -> {
+            initializeTwilio();
+            
+            logger.info("Ending conference {}", conferenceSid);
+            
+            List<Participant> participants = getConferenceParticipants(conferenceSid);
+            for (Participant participant : participants) {
+                try {
+                    Participant.deleter(conferenceSid, participant.getSid()).delete();
+                    logger.info("Removed participant {} from conference", participant.getSid());
+                } catch (Exception e) {
+                    logger.warn("Failed to remove participant {}: {}", participant.getSid(), e.getMessage());
+                }
+            }
+            
+            logger.info("Conference {} ended successfully", conferenceSid);
+            return null;
+        });
+    }
+
+    /**
+     * Generate a secure token for webhook URLs to prevent unauthorized access
+     */
+    private String generateSecureToken(String conferenceSid, String timestamp) {
+        try {
+            String data = conferenceSid + ":" + timestamp + ":" + twilioAuthToken;
+            MessageDigest md = MessageDigest.getInstance("SHA-256");
+            byte[] hash = md.digest(data.getBytes("UTF-8"));
+            return Base64.getEncoder().encodeToString(hash).substring(0, 16); // First 16 chars
         } catch (Exception e) {
-            log.error("Failed to get participants for conference {}: {}", conferenceSid, e.getMessage(), e);
-            return new ArrayList<>();
+            logger.warn("Failed to generate secure token, using fallback: {}", e.getMessage());
+            return "fallback-token";
         }
     }
 
     /**
-     * Mute a participant
+     * Validate webhook security token
      */
-    public void muteParticipant(String conferenceSid, String callSid) {
+    public boolean validateWebhookToken(String conferenceSid, String timestamp, String token) {
         try {
-            initializeTwilio();
+            long timestampLong = Long.parseLong(timestamp);
+            long currentTime = System.currentTimeMillis();
             
-            ParticipantUpdater updater = Participant.updater(conferenceSid, callSid);
-            updater.setMuted(true);
-            updater.update();
+            // Check if timestamp is within 5 minutes (300,000 ms)
+            if (Math.abs(currentTime - timestampLong) > 300_000) {
+                logger.warn("Webhook token expired for conference {}", conferenceSid);
+                return false;
+            }
             
-            log.info("Muted participant {} in conference {}", callSid, conferenceSid);
+            String expectedToken = generateSecureToken(conferenceSid, timestamp);
+            boolean isValid = expectedToken.equals(token);
             
+            if (!isValid) {
+                logger.warn("Invalid webhook token for conference {}", conferenceSid);
+            }
+            
+            return isValid;
         } catch (Exception e) {
-            log.error("Failed to mute participant {} in conference {}: {}", 
-                callSid, conferenceSid, e.getMessage(), e);
-        }
-    }
-
-    /**
-     * Unmute a participant
-     */
-    public void unmuteParticipant(String conferenceSid, String callSid) {
-        try {
-            initializeTwilio();
-            
-            ParticipantUpdater updater = Participant.updater(conferenceSid, callSid);
-            updater.setMuted(false);
-            updater.update();
-            
-            log.info("Unmuted participant {} in conference {}", callSid, conferenceSid);
-            
-        } catch (Exception e) {
-            log.error("Failed to unmute participant {} in conference {}: {}", 
-                callSid, conferenceSid, e.getMessage(), e);
-        }
-    }
-
-    /**
-     * Check if a call is a bot call
-     * This is a simple implementation - you may want to enhance this logic
-     */
-    private boolean isBotCall(String callSid) {
-        try {
-            initializeTwilio();
-            Call call = Call.fetcher(callSid).fetch();
-            
-            // Simple check: if both to and from are the same (bot phone number), it's likely a bot
-            return twilioPhoneNumber.equals(call.getTo()) && 
-                   twilioPhoneNumber.equals(call.getFrom());
-                   
-        } catch (Exception e) {
-            log.error("Failed to check if call {} is a bot: {}", callSid, e.getMessage());
+            logger.error("Error validating webhook token: {}", e.getMessage());
             return false;
         }
     }
 
     /**
-     * Get the number of participants in a conference
+     * Execute operation with retry logic for handling transient failures
      */
-    public int getParticipantCount(String conferenceSid) {
-        return getParticipants(conferenceSid).size();
-    }
-
-    /**
-     * Check if conference has any bots
-     */
-    public boolean hasBot(String conferenceSid) {
-        List<Participant> participants = getParticipants(conferenceSid);
-        return participants.stream()
-            .anyMatch(p -> isBotCall(p.getCallSid()));
+    private <T> T executeWithRetry(java.util.concurrent.Callable<T> operation) {
+        Exception lastException = null;
+        
+        for (int attempt = 1; attempt <= MAX_RETRY_ATTEMPTS; attempt++) {
+            try {
+                return operation.call();
+            } catch (Exception e) {
+                lastException = e;
+                logger.warn("Attempt {} failed: {}", attempt, e.getMessage());
+                
+                if (attempt < MAX_RETRY_ATTEMPTS) {
+                    try {
+                        TimeUnit.MILLISECONDS.sleep(RETRY_DELAY_MS * attempt);
+                    } catch (InterruptedException ie) {
+                        Thread.currentThread().interrupt();
+                        break;
+                    }
+                }
+            }
+        }
+        
+        logger.error("All {} attempts failed", MAX_RETRY_ATTEMPTS);
+        throw new RuntimeException("Operation failed after " + MAX_RETRY_ATTEMPTS + " attempts", lastException);
     }
 }
