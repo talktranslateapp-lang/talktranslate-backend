@@ -10,6 +10,7 @@ import lombok.extern.slf4j.Slf4j;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Service;
 
+import java.net.URI;
 import java.util.List;
 import java.util.ArrayList;
 import java.util.stream.StreamSupport;
@@ -51,11 +52,14 @@ public class BotParticipantService {
                 "?conferenceSid=" + conferenceSid + 
                 "&targetLanguage=" + targetLanguage;
 
+            log.info("Creating bot call with webhook URL: {}", botWebhookUrl);
+
+            // Fixed: Use setUrl() method to properly set the webhook URL
             Call call = Call.creator(
                 new PhoneNumber(twilioPhoneNumber), // To (bot's "phone")
-                new PhoneNumber(twilioPhoneNumber), // From
-                botWebhookUrl
-            ).create();
+                new PhoneNumber(twilioPhoneNumber)  // From
+            ).setUrl(URI.create(botWebhookUrl))     // Webhook URL
+             .create();
 
             log.info("Created bot call {} for conference {}", call.getSid(), conferenceSid);
 
@@ -87,11 +91,14 @@ public class BotParticipantService {
                 "&targetLanguage=" + targetLanguage +
                 "&sourceLanguage=" + sourceLanguage;
 
+            log.info("Creating bot call with webhook URL: {}", botWebhookUrl);
+
+            // Fixed: Use setUrl() method to properly set the webhook URL
             Call call = Call.creator(
                 new PhoneNumber(twilioPhoneNumber), // To (bot's "phone")
-                new PhoneNumber(twilioPhoneNumber), // From
-                botWebhookUrl
-            ).create();
+                new PhoneNumber(twilioPhoneNumber)  // From
+            ).setUrl(URI.create(botWebhookUrl))     // Webhook URL
+             .create();
 
             log.info("Created bot call {} for conference {} with source {} and target {}", 
                 call.getSid(), conferenceSid, sourceLanguage, targetLanguage);
