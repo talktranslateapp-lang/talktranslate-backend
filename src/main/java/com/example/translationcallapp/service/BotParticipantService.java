@@ -54,12 +54,12 @@ public class BotParticipantService {
 
             log.info("Creating bot call with webhook URL: {}", botWebhookUrl);
 
-            // Fixed: Use setUrl() method to properly set the webhook URL
+            // Fixed: Use correct Twilio API signature with URI as third parameter
             Call call = Call.creator(
                 new PhoneNumber(twilioPhoneNumber), // To (bot's "phone")
-                new PhoneNumber(twilioPhoneNumber)  // From
-            ).setUrl(URI.create(botWebhookUrl))     // Webhook URL
-             .create();
+                new PhoneNumber(twilioPhoneNumber), // From
+                URI.create(botWebhookUrl)           // Webhook URL as third parameter
+            ).create();
 
             log.info("Created bot call {} for conference {}", call.getSid(), conferenceSid);
 
