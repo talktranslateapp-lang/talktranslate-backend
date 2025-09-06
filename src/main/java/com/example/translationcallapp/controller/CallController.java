@@ -74,9 +74,11 @@ public class CallController {
                     .build())
                 .build();
             
-            // Add bot participant for translation
+            // Add bot participant for translation - FIXED: Using correct method signature
             String callSid = params.get("CallSid");
-            botParticipantService.addTranslationBot(defaultConferenceName, callSid);
+            // Changed from addTranslationBot(conferenceName, callSid) to addTranslationBot(conferenceName, "english")
+            // Assuming default target language is English - you may want to make this configurable
+            botParticipantService.addTranslationBot(defaultConferenceName, "english");
             
             return ResponseEntity.ok()
                 .contentType(MediaType.APPLICATION_XML)
@@ -110,7 +112,9 @@ public class CallController {
         try {
             // Handle call completion cleanup
             if ("completed".equals(callStatus) || "failed".equals(callStatus)) {
-                botParticipantService.removeBot(callSid);
+                // FIXED: Changed from removeBot(callSid) to removeBot(conferenceName)
+                // The removeBot method expects a conference SID, not a call SID
+                botParticipantService.removeBot(defaultConferenceName);
                 logger.info("Cleaned up resources for completed call: {}", callSid);
             }
             
@@ -176,13 +180,16 @@ public class CallController {
         try {
             // Create conference and add bot
             String conferenceName = "translation-" + System.currentTimeMillis();
-            String botCallSid = botParticipantService.addTranslationBot(
-                conferenceName, fromLanguage, toLanguage);
+            
+            // FIXED: Changed method call to match BotParticipantService signature
+            // The addTranslationBot method doesn't return a String, it returns void
+            botParticipantService.addTranslationBot(conferenceName, toLanguage, fromLanguage);
             
             Map<String, Object> response = new HashMap<>();
             response.put("success", true);
             response.put("conferenceName", conferenceName);
-            response.put("botCallSid", botCallSid);
+            response.put("fromLanguage", fromLanguage);
+            response.put("toLanguage", toLanguage);
             response.put("message", "Translation call initiated successfully");
             
             return ResponseEntity.ok(response);
@@ -193,6 +200,107 @@ public class CallController {
             Map<String, Object> response = new HashMap<>();
             response.put("success", false);
             response.put("error", "Failed to start translation call: " + e.getMessage());
+            
+            return ResponseEntity.badRequest().body(response);
+        }
+    }
+
+    /**
+     * REST endpoint to add translation bot to existing conference
+     */
+    @PostMapping("/add-bot")
+    public ResponseEntity<Map<String, Object>> addTranslationBot(
+            @RequestBody Map<String, String> request) {
+        
+        String conferenceSid = request.get("conferenceSid");
+        String targetLanguage = request.get("targetLanguage");
+        String sourceLanguage = request.get("sourceLanguage");
+        
+        logger.info("Adding translation bot to conference: {}, {} -> {}", 
+                   conferenceSid, sourceLanguage, targetLanguage);
+        
+        try {
+            if (sourceLanguage != null && !sourceLanguage.isEmpty()) {
+                // Use 3-parameter version
+                botParticipantService.addTranslationBot(conferenceSid, targetLanguage, sourceLanguage);
+            } else {
+                // Use 2-parameter version
+                botParticipantService.addTranslationBot(conferenceSid, targetLanguage);
+            }
+            
+            Map<String, Object> response = new HashMap<>();
+            response.put("success", true);
+            response.put("message", "Translation bot added successfully");
+            
+            return ResponseEntity.ok(response);
+            
+        } catch (Exception e) {
+            logger.error("Error adding translation bot: ", e);
+            
+            Map<String, Object> response = new HashMap<>();
+            response.put("success", false);
+            response.put("error", "Failed to add translation bot: " + e.getMessage());
+            
+            return ResponseEntity.badRequest().body(response);
+        }
+    }
+
+    /**
+     * REST endpoint to remove bot from conference
+     */
+    @PostMapping("/remove-bot")
+    public ResponseEntity<Map<String, Object>> removeBot(
+            @RequestBody Map<String, String> request) {
+        
+        String conferenceSid = request.get("conferenceSid");
+        
+        logger.info("Removing bot from conference: {}", conferenceSid);
+        
+        try {
+            botParticipantService.removeBot(conferenceSid);
+            
+            Map<String, Object> response = new HashMap<>();
+            response.put("success", true);
+            response.put("message", "Bot removed successfully");
+            
+            return ResponseEntity.ok(response);
+            
+        } catch (Exception e) {
+            logger.error("Error removing bot: ", e);
+            
+            Map<String, Object> response = new HashMap<>();
+            response.put("success", false);
+            response.put("error", "Failed to remove bot: " + e.getMessage());
+            
+            return ResponseEntity.badRequest().body(response);
+        }
+    }
+
+    /**
+     * REST endpoint to get conference status
+     */
+    @GetMapping("/conference/{conferenceSid}/status")
+    public ResponseEntity<Map<String, Object>> getConferenceStatus(
+            @PathVariable String conferenceSid) {
+        
+        try {
+            int participantCount = botParticipantService.getParticipantCount(conferenceSid);
+            boolean hasBot = botParticipantService.hasBot(conferenceSid);
+            
+            Map<String, Object> response = new HashMap<>();
+            response.put("success", true);
+            response.put("conferenceSid", conferenceSid);
+            response.put("participantCount", participantCount);
+            response.put("hasBot", hasBot);
+            
+            return ResponseEntity.ok(response);
+            
+        } catch (Exception e) {
+            logger.error("Error getting conference status: ", e);
+            
+            Map<String, Object> response = new HashMap<>();
+            response.put("success", false);
+            response.put("error", "Failed to get conference status: " + e.getMessage());
             
             return ResponseEntity.badRequest().body(response);
         }

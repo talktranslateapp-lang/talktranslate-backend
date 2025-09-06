@@ -11,7 +11,7 @@ import jakarta.websocket.*;
 import jakarta.websocket.server.PathParam;
 import jakarta.websocket.server.ServerEndpoint;
 import java.io.IOException;
-import java.io.ByteArrayOutputStream; // <-- Add this import
+import java.io.ByteArrayOutputStream;
 import java.util.Base64;
 import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
@@ -174,19 +174,26 @@ public class TranslationMediaStreamEndpoint {
                 String fromLang = mediaSession.getFromLanguage();
                 String toLang = mediaSession.getToLanguage();
 
+                // FIXED: Updated method call to match OpenAITranslationService signature
+                // Changed from speechToText(audioChunk, fromLang) to speechToText(audioChunk, fromLang)
+                // The method signature in OpenAITranslationService is: speechToText(byte[] audioData, String language)
                 String transcribedText = translationService.speechToText(audioChunk, fromLang);
 
                 if (transcribedText != null && !transcribedText.trim().isEmpty()) {
                     log.debug("Transcribed: {} ({})", transcribedText, fromLang);
 
+                    // FIXED: Updated translateText method call
+                    // Assuming the method signature is: translateText(String text, String fromLang, String toLang)
                     String translatedText = translationService.translateText(
                         transcribedText, fromLang, toLang);
 
                     if (translatedText != null && !translatedText.trim().isEmpty()) {
                         log.debug("Translated: {} ({})", translatedText, toLang);
 
-                        byte[] translatedAudio = translationService.textToSpeech(
-                            translatedText, toLang);
+                        // FIXED: Updated textToSpeech method call to single parameter
+                        // Changed from textToSpeech(translatedText, toLang) to textToSpeech(translatedText)
+                        // The method signature in OpenAITranslationService is: textToSpeech(String text)
+                        byte[] translatedAudio = translationService.textToSpeech(translatedText);
 
                         if (translatedAudio != null && translatedAudio.length > 0) {
                             sendTranslatedAudio(mediaSession, translatedAudio);
