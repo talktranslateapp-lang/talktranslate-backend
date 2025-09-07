@@ -1,0 +1,194 @@
+# Production application.yml
+spring:
+  profiles:
+    active: production
+  
+  application:
+    name: translation-call-app
+  
+  # Database configuration for production
+  datasource:
+    url: ${DATABASE_URL:jdbc:postgresql://localhost:5432/translation_app}
+    username: ${DATABASE_USERNAME:app_user}
+    password: ${DATABASE_PASSWORD}
+    driver-class-name: org.postgresql.Driver
+    hikari:
+      maximum-pool-size: 20
+      minimum-idle: 5
+      idle-timeout: 300000
+      connection-timeout: 20000
+      leak-detection-threshold: 60000
+  
+  jpa:
+    hibernate:
+      ddl-auto: validate
+    show-sql: false
+    properties:
+      hibernate:
+        dialect: org.hibernate.dialect.PostgreSQLDialect
+        format_sql: false
+        use_sql_comments: false
+  
+  # Caching configuration
+  cache:
+    type: caffeine
+    caffeine:
+      spec: maximumSize=1000,expireAfterWrite=30m
+  
+  # Security configuration
+  security:
+    require-ssl: true
+
+# Server configuration
+server:
+  port: ${PORT:8080}
+  servlet:
+    context-path: /
+  compression:
+    enabled: true
+    mime-types: application/json,application/xml,text/html,text/xml,text/plain
+  http2:
+    enabled: true
+
+# Twilio Configuration
+twilio:
+  account:
+    sid: ${TWILIO_ACCOUNT_SID}
+  auth:
+    token: ${TWILIO_AUTH_TOKEN}
+  phone:
+    number: ${TWILIO_PHONE_NUMBER}
+  webhook:
+    validation:
+      enabled: true
+  rate-limiting:
+    enabled: true
+    calls-per-minute: 60
+    participants-per-conference: 50
+
+# OpenAI Configuration
+openai:
+  api:
+    key: ${OPENAI_API_KEY}
+  model: gpt-4o-mini
+  max-tokens: 150
+  temperature: 0.3
+  rate-limiting:
+    requests-per-minute: 100
+
+# Application Configuration
+app:
+  base-url: ${APP_BASE_URL:https://talktranslate-backend-production.up.railway.app}
+  websocket:
+    stream-url: ${WEBSOCKET_STREAM_URL:wss://talktranslate-backend-production.up.railway.app/ws/stream}
+  
+  # Conference management
+  conference:
+    max-participants: 50
+    idle-timeout-minutes: 60
+    cleanup-interval-minutes: 15
+    security:
+      token-expiry-minutes: 30
+      max-conference-duration-hours: 4
+  
+  # Bot configuration
+  bot:
+    max-concurrent-bots: 100
+    stream-buffer-size: 4096
+    reconnect-attempts: 3
+    health-check-interval-seconds: 30
+
+# Metrics and monitoring
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health,info,metrics,prometheus
+      base-path: /actuator
+  endpoint:
+    health:
+      show-details: when-authorized
+      probes:
+        enabled: true
+    metrics:
+      enabled: true
+  metrics:
+    export:
+      prometheus:
+        enabled: true
+  health:
+    circuitbreakers:
+      enabled: true
+
+# Logging configuration
+logging:
+  level:
+    com.example.translationcallapp: INFO
+    com.twilio: WARN
+    org.springframework.security: WARN
+    org.hibernate: WARN
+    org.apache.http: WARN
+  pattern:
+    console: "%d{yyyy-MM-dd HH:mm:ss} [%thread] %-5level %logger{36} - %msg%n"
+    file: "%d{yyyy-MM-dd HH:mm:ss} [%thread] %-5level %logger{36} - %msg%n"
+  file:
+    name: logs/translation-app.log
+    max-size: 100MB
+    max-history: 30
+
+# Circuit breaker configuration
+resilience4j:
+  circuitbreaker:
+    instances:
+      twilioApi:
+        register-health-indicator: true
+        sliding-window-size: 10
+        minimum-number-of-calls: 5
+        permitted-number-of-calls-in-half-open-state: 3
+        automatic-transition-from-open-to-half-open-enabled: true
+        wait-duration-in-open-state: 5s
+        failure-rate-threshold: 50
+        record-exceptions:
+          - com.twilio.exception.ApiException
+      openaiApi:
+        register-health-indicator: true
+        sliding-window-size: 10
+        minimum-number-of-calls: 5
+        failure-rate-threshold: 60
+        wait-duration-in-open-state: 10s
+
+# Rate limiting
+bucket4j:
+  enabled: true
+  filters:
+    - cache-name: rate-limit-cache
+      url: /api/calls/.*
+      rate-limits:
+        - execute-condition: "true"
+          expression: "getRemoteAddr()"
+          bandwidths:
+            - capacity: 20
+              time: 1
+              unit: minutes
+
+# Custom application properties
+translation:
+  supported-languages:
+    - english
+    - spanish
+    - french
+    - german
+    - italian
+    - portuguese
+    - chinese
+    - japanese
+    - korean
+    - arabic
+  
+  default-source-language: english
+  translation-timeout-seconds: 30
+  
+  quality:
+    enable-profanity-filter: true
+    enable-confidence-scoring: true
+    minimum-confidence-threshold: 0.7

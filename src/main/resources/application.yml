@@ -1,0 +1,176 @@
+# Complete application.yml for enhanced BotParticipantService
+spring:
+  application:
+    name: translation-call-app
+  
+  # Database configuration
+  datasource:
+    url: ${DATABASE_URL:jdbc:h2:mem:testdb}
+    username: ${DATABASE_USERNAME:sa}
+    password: ${DATABASE_PASSWORD:}
+    driver-class-name: ${DATABASE_DRIVER:org.h2.Driver}
+    hikari:
+      maximum-pool-size: 10
+      minimum-idle: 2
+      idle-timeout: 300000
+      connection-timeout: 20000
+  
+  jpa:
+    hibernate:
+      ddl-auto: update
+    show-sql: false
+    properties:
+      hibernate:
+        format_sql: false
+  
+  # H2 Console (for development)
+  h2:
+    console:
+      enabled: true
+      path: /h2-console
+  
+  # Caching
+  cache:
+    type: caffeine
+    caffeine:
+      spec: maximumSize=1000,expireAfterWrite=30m
+    cache-names:
+      - conferences
+      - participants
+      - botStats
+
+# Server configuration
+server:
+  port: ${PORT:8080}
+  servlet:
+    context-path: /
+
+# Twilio Configuration
+twilio:
+  account:
+    sid: ${TWILIO_ACCOUNT_SID}
+  auth:
+    token: ${TWILIO_AUTH_TOKEN}
+  phone:
+    number: ${TWILIO_PHONE_NUMBER}
+  webhook:
+    validation:
+      enabled: true
+  rate-limiting:
+    calls-per-minute: 60
+    participants-per-conference: 50
+
+# OpenAI Configuration
+openai:
+  api:
+    key: ${OPENAI_API_KEY}
+  model: gpt-4o-mini
+  max-tokens: 150
+  temperature: 0.3
+
+# Application Configuration
+app:
+  base-url: ${APP_BASE_URL:http://localhost:8080}
+  websocket:
+    stream-url: ${WEBSOCKET_STREAM_URL:ws://localhost:8080/ws/stream}
+  
+  # Bot configuration
+  bot:
+    max-concurrent-bots: 100
+    stream-buffer-size: 4096
+    reconnect-attempts: 3
+    health-check-interval-seconds: 30
+  
+  # Conference management
+  conference:
+    max-participants: 50
+    idle-timeout-minutes: 60
+    cleanup-interval-minutes: 15
+    security:
+      token-expiry-minutes: 30
+      max-conference-duration-hours: 4
+
+# Circuit Breaker Configuration
+resilience4j:
+  circuitbreaker:
+    instances:
+      twilioApi:
+        register-health-indicator: true
+        sliding-window-size: 10
+        minimum-number-of-calls: 5
+        permitted-number-of-calls-in-half-open-state: 3
+        automatic-transition-from-open-to-half-open-enabled: true
+        wait-duration-in-open-state: 5s
+        failure-rate-threshold: 50
+        record-exceptions:
+          - com.twilio.exception.ApiException
+          - java.net.SocketTimeoutException
+          - java.net.ConnectException
+      openaiApi:
+        register-health-indicator: true
+        sliding-window-size: 10
+        minimum-number-of-calls: 5
+        failure-rate-threshold: 60
+        wait-duration-in-open-state: 10s
+  
+  retry:
+    instances:
+      twilioApi:
+        max-attempts: 3
+        wait-duration: 1s
+        exponential-backoff-multiplier: 2
+        retry-exceptions:
+          - com.twilio.exception.ApiException
+      openaiApi:
+        max-attempts: 2
+        wait-duration: 2s
+
+# Metrics and monitoring
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health,info,metrics,prometheus
+      base-path: /actuator
+  endpoint:
+    health:
+      show-details: when-authorized
+      probes:
+        enabled: true
+    metrics:
+      enabled: true
+  metrics:
+    export:
+      prometheus:
+        enabled: true
+  health:
+    circuitbreakers:
+      enabled: true
+
+# Logging configuration
+logging:
+  level:
+    com.example.translationcallapp: INFO
+    com.twilio: WARN
+    org.springframework.security: WARN
+    org.hibernate: WARN
+    io.github.resilience4j: INFO
+  pattern:
+    console: "%d{yyyy-MM-dd HH:mm:ss} [%thread] %-5level %logger{36} - %msg%n"
+
+# Translation configuration
+translation:
+  supported-languages:
+    - english
+    - spanish
+    - french
+    - german
+    - italian
+    - portuguese
+    - chinese
+    - japanese
+    - korean
+    - arabic
+  
+  default-source-language: english
+  translation-timeout-seconds: 30

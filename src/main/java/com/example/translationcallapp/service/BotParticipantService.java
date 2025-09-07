@@ -1,289 +1,580 @@
 package com.example.translationcallapp.service;
 
 import com.twilio.Twilio;
+import com.twilio.exception.ApiException;
+import com.twilio.http.HttpMethod;
 import com.twilio.rest.api.v2010.account.Call;
 import com.twilio.rest.api.v2010.account.Conference;
 import com.twilio.rest.api.v2010.account.conference.Participant;
-import com.twilio.rest.api.v2010.account.conference.ParticipantCreator;
 import com.twilio.type.PhoneNumber;
+import io.github.resilience4j.circuitbreaker.annotation.CircuitBreaker;
+import io.github.resilience4j.retry.annotation.Retry;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.beans.factory.annotation.Value;
+import org.springframework.cache.annotation.Cacheable;
+import org.springframework.cache.annotation.CacheEvict;
 import org.springframework.stereotype.Service;
+import org.springframework.util.StringUtils;
 
-import javax.crypto.Mac;
-import javax.crypto.spec.SecretKeySpec;
+import jakarta.annotation.PostConstruct;
+import jakarta.annotation.PreDestroy;
 import java.net.URI;
-import java.security.MessageDigest;
-import java.util.Base64;
-import java.util.List;
-import java.util.concurrent.TimeUnit;
+import java.time.LocalDateTime;
+import java.time.format.DateTimeFormatter;
+import java.util.*;
+import java.util.concurrent.*;
+import java.util.stream.Collectors;
 
 @Service
 public class BotParticipantService {
 
     private static final Logger logger = LoggerFactory.getLogger(BotParticipantService.class);
-    private static final int MAX_RETRY_ATTEMPTS = 3;
-    private static final long RETRY_DELAY_MS = 1000;
+    private static final String CIRCUIT_BREAKER_NAME = "twilioApi";
+    private static final int MAX_PARTICIPANTS_PER_PAGE = 50;
+    private static final int DEFAULT_TIMEOUT_SECONDS = 30;
 
     @Value("${twilio.account.sid}")
-    private String twilioAccountSid;
+    private String accountSid;
 
     @Value("${twilio.auth.token}")
-    private String twilioAuthToken;
+    private String authToken;
 
     @Value("${twilio.phone.number}")
     private String twilioPhoneNumber;
 
-    @Value("${app.base.url}")
+    @Value("${app.base-url}")
     private String baseUrl;
 
-    private volatile boolean twilioInitialized = false;
+    @Value("${app.bot.max-concurrent-bots:100}")
+    private int maxConcurrentBots;
 
-    public synchronized void initializeTwilio() {
-        if (!twilioInitialized) {
-            if (twilioAccountSid == null || twilioAuthToken == null) {
-                logger.error("Twilio credentials not configured");
-                throw new RuntimeException("Twilio credentials not configured");
-            }
-            Twilio.init(twilioAccountSid, twilioAuthToken);
-            twilioInitialized = true;
-            logger.info("Twilio initialized successfully");
+    @Value("${app.bot.reconnect-attempts:3}")
+    private int maxReconnectAttempts;
+
+    @Value("${twilio.rate-limiting.calls-per-minute:60}")
+    private int maxCallsPerMinute;
+
+    @Autowired
+    private TwilioSecurityService twilioSecurityService;
+
+    // Thread pool for async operations
+    private ExecutorService executorService;
+    
+    // Rate limiting
+    private final Semaphore rateLimiter = new Semaphore(60); // 60 calls per minute
+    private final ScheduledExecutorService rateLimiterReset = Executors.newSingleThreadScheduledExecutor();
+    
+    // Bot participant tracking
+    private final ConcurrentHashMap<String, BotParticipantInfo> activeBots = new ConcurrentHashMap<>();
+    private final ConcurrentHashMap<String, Set<String>> conferenceBotsMap = new ConcurrentHashMap<>();
+
+    @PostConstruct
+    public void init() {
+        try {
+            Twilio.init(accountSid, authToken);
+            
+            // Initialize thread pool
+            executorService = Executors.newFixedThreadPool(10);
+            
+            // Reset rate limiter every minute
+            rateLimiterReset.scheduleAtFixedRate(() -> {
+                rateLimiter.release(maxCallsPerMinute - rateLimiter.availablePermits());
+            }, 1, 1, TimeUnit.MINUTES);
+            
+            logger.info("BotParticipantService initialized with max {} concurrent bots", maxConcurrentBots);
+            
+        } catch (Exception e) {
+            logger.error("Failed to initialize BotParticipantService: {}", e.getMessage(), e);
+            throw new RuntimeException("Service initialization failed", e);
         }
     }
 
-    /**
-     * Add a translation bot to a conference with retry logic
-     */
-    public String addTranslationBot(String conferenceSid, String sourceLanguage, String targetLanguage) {
-        return executeWithRetry(() -> {
-            initializeTwilio();
-            
-            // Generate secure webhook URL with timestamp and hash for security
-            String timestamp = String.valueOf(System.currentTimeMillis());
-            String secureToken = generateSecureToken(conferenceSid, timestamp);
-            
-            String botWebhookUrl = String.format("%s/webhook/bot?conferenceSid=%s&targetLanguage=%s&sourceLanguage=%s&timestamp=%s&token=%s",
-                baseUrl, conferenceSid, targetLanguage, sourceLanguage, timestamp, secureToken);
-            
-            logger.info("Adding translation bot for conference {} - source: {}, target: {}", 
-                conferenceSid, sourceLanguage, targetLanguage);
-            logger.debug("Bot webhook URL: {}", botWebhookUrl);
-
-            // Create the bot call using correct Twilio API
-            Call call = Call.creator(
-                new PhoneNumber(twilioPhoneNumber), // To
-                new PhoneNumber(twilioPhoneNumber), // From  
-                URI.create(botWebhookUrl)           // Webhook URL
-            )
-            .setStatusCallback(URI.create(baseUrl + "/webhook/call-status"))
-            .setStatusCallbackEvent("initiated ringing answered completed")
-            .setStatusCallbackMethod("POST")
-            .create();
-
-            logger.info("Translation bot call created with SID: {}", call.getSid());
-            return call.getSid();
-        });
-    }
-
-    /**
-     * Add a simple bot to conference (without translation)
-     */
-    public String addBot(String conferenceSid, String targetLanguage) {
-        return executeWithRetry(() -> {
-            initializeTwilio();
-            
-            String timestamp = String.valueOf(System.currentTimeMillis());
-            String secureToken = generateSecureToken(conferenceSid, timestamp);
-            
-            String botWebhookUrl = String.format("%s/webhook/bot?conferenceSid=%s&targetLanguage=%s&timestamp=%s&token=%s",
-                baseUrl, conferenceSid, targetLanguage, timestamp, secureToken);
-            
-            logger.info("Creating bot call for conference {} with target language {}", conferenceSid, targetLanguage);
-
-            Call call = Call.creator(
-                new PhoneNumber(twilioPhoneNumber),
-                new PhoneNumber(twilioPhoneNumber),
-                URI.create(botWebhookUrl)
-            )
-            .setStatusCallback(URI.create(baseUrl + "/webhook/call-status"))
-            .create();
-
-            logger.info("Bot call created successfully with SID: {}", call.getSid());
-            return call.getSid();
-        });
-    }
-
-    /**
-     * Add a regular participant to conference
-     */
-    public String addParticipantToConference(String conferenceSid, String phoneNumber) {
-        return executeWithRetry(() -> {
-            initializeTwilio();
-            
-            logger.info("Adding participant {} to conference {}", phoneNumber, conferenceSid);
-
-            // Create secure webhook URL for participant
-            String timestamp = String.valueOf(System.currentTimeMillis());
-            String secureToken = generateSecureToken(conferenceSid, timestamp);
-            String participantWebhookUrl = String.format("%s/webhook/participant?conferenceSid=%s&timestamp=%s&token=%s",
-                baseUrl, conferenceSid, timestamp, secureToken);
-
-            Call call = Call.creator(
-                new PhoneNumber(phoneNumber),        // To (participant's phone)
-                new PhoneNumber(twilioPhoneNumber),  // From (your Twilio number)
-                URI.create(participantWebhookUrl)    // Webhook URL
-            )
-            .setStatusCallback(URI.create(baseUrl + "/webhook/call-status"))
-            .create();
-
-            logger.info("Participant call created with SID: {} for phone {}", call.getSid(), phoneNumber);
-            return call.getSid();
-        });
-    }
-
-    /**
-     * Get conference information
-     */
-    public Conference getConferenceInfo(String conferenceSid) {
-        return executeWithRetry(() -> {
-            initializeTwilio();
-            
-            Conference conference = Conference.fetcher(conferenceSid).fetch();
-            logger.info("Conference {} status: {}, participants: {}", 
-                conferenceSid, conference.getStatus(), conference.getReasonConferenceEnded());
-            return conference;
-        });
-    }
-
-    /**
-     * Remove participant from conference
-     */
-    public void removeParticipantFromConference(String conferenceSid, String participantSid) {
-        executeWithRetry(() -> {
-            initializeTwilio();
-            
-            logger.info("Removing participant {} from conference {}", participantSid, conferenceSid);
-
-            // First mute the participant
-            Participant.updater(conferenceSid, participantSid)
-                .setMuted(true)
-                .update();
-
-            // Then remove them
-            Participant.deleter(conferenceSid, participantSid).delete();
-            logger.info("Participant {} removed from conference {}", participantSid, conferenceSid);
-            return null;
-        });
-    }
-
-    /**
-     * Get all participants in a conference
-     */
-    public List<Participant> getConferenceParticipants(String conferenceSid) {
-        return executeWithRetry(() -> {
-            initializeTwilio();
-            
-            logger.info("Getting participants for conference {}", conferenceSid);
-            List<Participant> participants = Participant.reader(conferenceSid).read();
-            logger.info("Found {} participants in conference {}", participants.size(), conferenceSid);
-            
-            return participants;
-        });
-    }
-
-    /**
-     * End conference by removing all participants
-     */
-    public void endConference(String conferenceSid) {
-        executeWithRetry(() -> {
-            initializeTwilio();
-            
-            logger.info("Ending conference {}", conferenceSid);
-            
-            List<Participant> participants = getConferenceParticipants(conferenceSid);
-            for (Participant participant : participants) {
-                try {
-                    Participant.deleter(conferenceSid, participant.getSid()).delete();
-                    logger.info("Removed participant {} from conference", participant.getSid());
-                } catch (Exception e) {
-                    logger.warn("Failed to remove participant {}: {}", participant.getSid(), e.getMessage());
+    @PreDestroy
+    public void cleanup() {
+        try {
+            if (executorService != null && !executorService.isShutdown()) {
+                executorService.shutdown();
+                if (!executorService.awaitTermination(30, TimeUnit.SECONDS)) {
+                    executorService.shutdownNow();
                 }
             }
             
-            logger.info("Conference {} ended successfully", conferenceSid);
-            return null;
-        });
-    }
-
-    /**
-     * Generate a secure token for webhook URLs to prevent unauthorized access
-     */
-    private String generateSecureToken(String conferenceSid, String timestamp) {
-        try {
-            String data = conferenceSid + ":" + timestamp + ":" + twilioAuthToken;
-            MessageDigest md = MessageDigest.getInstance("SHA-256");
-            byte[] hash = md.digest(data.getBytes("UTF-8"));
-            return Base64.getEncoder().encodeToString(hash).substring(0, 16); // First 16 chars
+            if (rateLimiterReset != null && !rateLimiterReset.isShutdown()) {
+                rateLimiterReset.shutdown();
+            }
+            
+            // Cleanup any remaining bot participants
+            cleanupAllBotParticipants();
+            
+            logger.info("BotParticipantService cleanup completed");
+            
         } catch (Exception e) {
-            logger.warn("Failed to generate secure token, using fallback: {}", e.getMessage());
-            return "fallback-token";
+            logger.error("Error during BotParticipantService cleanup: {}", e.getMessage(), e);
         }
     }
 
     /**
-     * Validate webhook security token
+     * Creates a bot participant with enhanced security and monitoring
      */
-    public boolean validateWebhookToken(String conferenceSid, String timestamp, String token) {
+    @CircuitBreaker(name = CIRCUIT_BREAKER_NAME, fallbackMethod = "createBotParticipantFallback")
+    @Retry(name = CIRCUIT_BREAKER_NAME)
+    public CompletableFuture<String> createBotParticipantAsync(String conferenceName, 
+                                                              String targetLanguage, 
+                                                              String sourceLanguage) {
+        return CompletableFuture.supplyAsync(() -> {
+            try {
+                return createBotParticipant(conferenceName, targetLanguage, sourceLanguage);
+            } catch (Exception e) {
+                logger.error("Async bot creation failed for conference {}: {}", conferenceName, e.getMessage());
+                throw new RuntimeException(e);
+            }
+        }, executorService);
+    }
+
+    /**
+     * Creates a bot participant call and adds it to the specified conference
+     */
+    public String createBotParticipant(String conferenceName, String targetLanguage, String sourceLanguage) {
+        // Validate inputs
+        if (!StringUtils.hasText(conferenceName)) {
+            throw new IllegalArgumentException("Conference name cannot be empty");
+        }
+        if (!isValidLanguage(targetLanguage) || !isValidLanguage(sourceLanguage)) {
+            throw new IllegalArgumentException("Invalid language specified");
+        }
+
+        // Check rate limiting
+        if (!rateLimiter.tryAcquire()) {
+            throw new RuntimeException("Rate limit exceeded for bot creation");
+        }
+
+        // Check concurrent bot limit
+        if (activeBots.size() >= maxConcurrentBots) {
+            throw new RuntimeException("Maximum concurrent bot limit reached");
+        }
+
         try {
-            long timestampLong = Long.parseLong(timestamp);
-            long currentTime = System.currentTimeMillis();
+            logger.info("Creating bot participant for conference: {}, target: {}, source: {}", 
+                       conferenceName, targetLanguage, sourceLanguage);
+
+            // Generate secure webhook URL with token
+            String webhookUrl = buildSecureWebhookUrl(conferenceName, targetLanguage, sourceLanguage);
+            String statusCallbackUrl = baseUrl + "/webhook/bot/status";
+
+            // Create the bot call
+            Call call = Call.creator(
+                    new PhoneNumber(twilioPhoneNumber), // To
+                    new PhoneNumber(twilioPhoneNumber), // From
+                    URI.create(webhookUrl)
+            )
+            .setMethod(HttpMethod.POST)
+            .setStatusCallback(URI.create(statusCallbackUrl))
+            .setStatusCallbackEvent(Arrays.asList("initiated", "ringing", "answered", "completed", "failed"))
+            .setStatusCallbackMethod(HttpMethod.POST)
+            .setTimeout(DEFAULT_TIMEOUT_SECONDS)
+            .create();
+
+            // Track the bot participant
+            BotParticipantInfo botInfo = new BotParticipantInfo(
+                call.getSid(), conferenceName, targetLanguage, sourceLanguage, LocalDateTime.now()
+            );
+            activeBots.put(call.getSid(), botInfo);
             
-            // Check if timestamp is within 5 minutes (300,000 ms)
-            if (Math.abs(currentTime - timestampLong) > 300_000) {
-                logger.warn("Webhook token expired for conference {}", conferenceSid);
-                return false;
-            }
+            // Update conference -> bots mapping
+            conferenceBotsMap.computeIfAbsent(conferenceName, k -> ConcurrentHashMap.newKeySet())
+                           .add(call.getSid());
+
+            logger.info("Bot participant call created with SID: {} for conference: {}", 
+                       call.getSid(), conferenceName);
             
-            String expectedToken = generateSecureToken(conferenceSid, timestamp);
-            boolean isValid = expectedToken.equals(token);
-            
-            if (!isValid) {
-                logger.warn("Invalid webhook token for conference {}", conferenceSid);
-            }
-            
-            return isValid;
+            return call.getSid();
+
+        } catch (ApiException e) {
+            logger.error("Twilio API error creating bot participant: {} (Code: {})", e.getMessage(), e.getCode());
+            throw new RuntimeException("Failed to create bot participant: " + e.getMessage(), e);
         } catch (Exception e) {
-            logger.error("Error validating webhook token: {}", e.getMessage());
+            logger.error("Error creating bot participant for conference {}: {}", conferenceName, e.getMessage(), e);
+            throw new RuntimeException("Failed to create bot participant", e);
+        }
+    }
+
+    /**
+     * Fallback method for circuit breaker
+     */
+    public String createBotParticipantFallback(String conferenceName, String targetLanguage, 
+                                             String sourceLanguage, Exception ex) {
+        logger.warn("Bot participant creation fallback triggered for conference {}: {}", 
+                   conferenceName, ex.getMessage());
+        throw new RuntimeException("Bot participant service temporarily unavailable", ex);
+    }
+
+    /**
+     * Removes a bot participant with proper cleanup
+     */
+    @CircuitBreaker(name = CIRCUIT_BREAKER_NAME)
+    public void removeBotParticipant(String conferenceSid, String participantCallSid) {
+        try {
+            logger.info("Removing bot participant {} from conference {}", participantCallSid, conferenceSid);
+
+            // Find and remove from conference
+            Participant.deleter(conferenceSid, participantCallSid).delete();
+
+            // Clean up tracking
+            BotParticipantInfo botInfo = activeBots.remove(participantCallSid);
+            if (botInfo != null) {
+                Set<String> conferenceBots = conferenceBotsMap.get(botInfo.getConferenceName());
+                if (conferenceBots != null) {
+                    conferenceBots.remove(participantCallSid);
+                    if (conferenceBots.isEmpty()) {
+                        conferenceBotsMap.remove(botInfo.getConferenceName());
+                    }
+                }
+            }
+
+            logger.info("Bot participant {} successfully removed from conference {}", 
+                       participantCallSid, conferenceSid);
+
+        } catch (ApiException e) {
+            logger.error("Twilio API error removing bot participant {}: {} (Code: {})", 
+                        participantCallSid, e.getMessage(), e.getCode());
+            throw new RuntimeException("Failed to remove bot participant", e);
+        } catch (Exception e) {
+            logger.error("Error removing bot participant {} from conference {}: {}", 
+                        participantCallSid, conferenceSid, e.getMessage(), e);
+        }
+    }
+
+    /**
+     * Updates bot participant configuration with retry logic
+     */
+    @CircuitBreaker(name = CIRCUIT_BREAKER_NAME)
+    @Retry(name = CIRCUIT_BREAKER_NAME)
+    public void updateBotParticipant(String conferenceSid, String participantCallSid, boolean muted) {
+        try {
+            logger.info("Updating bot participant {} in conference {}, muted: {}", 
+                       participantCallSid, conferenceSid, muted);
+
+            Participant.updater(conferenceSid, participantCallSid)
+                    .setMuted(muted)
+                    .update();
+
+            logger.info("Bot participant {} updated successfully", participantCallSid);
+
+        } catch (ApiException e) {
+            logger.error("Twilio API error updating bot participant {}: {} (Code: {})", 
+                        participantCallSid, e.getMessage(), e.getCode());
+            throw new RuntimeException("Failed to update bot participant", e);
+        } catch (Exception e) {
+            logger.error("Error updating bot participant {} in conference {}: {}", 
+                        participantCallSid, conferenceSid, e.getMessage(), e);
+            throw new RuntimeException("Failed to update bot participant", e);
+        }
+    }
+
+    /**
+     * Gets conference information with caching
+     */
+    @Cacheable(value = "conferences", key = "#conferenceSid")
+    @CircuitBreaker(name = CIRCUIT_BREAKER_NAME)
+    public Conference getConference(String conferenceSid) {
+        try {
+            return Conference.fetcher(conferenceSid).fetch();
+        } catch (ApiException e) {
+            if (e.getCode() == 20404) { // Conference not found
+                logger.debug("Conference {} not found", conferenceSid);
+                return null;
+            }
+            logger.error("Twilio API error fetching conference {}: {} (Code: {})", 
+                        conferenceSid, e.getMessage(), e.getCode());
+            throw new RuntimeException("Failed to fetch conference", e);
+        } catch (Exception e) {
+            logger.error("Error fetching conference {}: {}", conferenceSid, e.getMessage());
+            return null;
+        }
+    }
+
+    /**
+     * Lists all participants with pagination support
+     */
+    @CircuitBreaker(name = CIRCUIT_BREAKER_NAME)
+    public List<Participant> getConferenceParticipants(String conferenceSid) {
+        try {
+            logger.debug("Fetching participants for conference: {}", conferenceSid);
+            
+            List<Participant> allParticipants = new ArrayList<>();
+            
+            // Use pagination for better performance
+            for (Participant participant : Participant.reader(conferenceSid)
+                    .limit(MAX_PARTICIPANTS_PER_PAGE)
+                    .read()) {
+                allParticipants.add(participant);
+            }
+            
+            logger.debug("Found {} participants in conference {}", allParticipants.size(), conferenceSid);
+            return allParticipants;
+            
+        } catch (ApiException e) {
+            if (e.getCode() == 20404) {
+                logger.debug("Conference {} not found when fetching participants", conferenceSid);
+                return new ArrayList<>();
+            }
+            logger.error("Twilio API error fetching participants for conference {}: {} (Code: {})", 
+                        conferenceSid, e.getMessage(), e.getCode());
+            throw new RuntimeException("Failed to fetch conference participants", e);
+        } catch (Exception e) {
+            logger.error("Error fetching participants for conference {}: {}", conferenceSid, e.getMessage());
+            return new ArrayList<>();
+        }
+    }
+
+    /**
+     * Enhanced bot participant detection with better logic
+     */
+    public List<String> findBotParticipants(String conferenceSid) {
+        try {
+            List<Participant> participants = getConferenceParticipants(conferenceSid);
+            
+            return participants.stream()
+                    .filter(this::isBotParticipant)
+                    .map(Participant::getCallSid)
+                    .collect(Collectors.toList());
+            
+        } catch (Exception e) {
+            logger.error("Error finding bot participants in conference {}: {}", conferenceSid, e.getMessage());
+            return new ArrayList<>();
+        }
+    }
+
+    /**
+     * Improved bot detection logic
+     */
+    private boolean isBotParticipant(Participant participant) {
+        try {
+            // Check if it's in our tracking
+            if (activeBots.containsKey(participant.getCallSid())) {
+                return true;
+            }
+            
+            // Fallback: check if calling from our number to itself
+            PhoneNumber from = participant.getFrom();
+            PhoneNumber to = participant.getTo();
+            
+            return from != null && to != null &&
+                   twilioPhoneNumber.equals(from.toString()) && 
+                   twilioPhoneNumber.equals(to.toString());
+                   
+        } catch (Exception e) {
+            logger.debug("Error checking if participant {} is bot: {}", 
+                        participant.getCallSid(), e.getMessage());
             return false;
         }
     }
 
     /**
-     * Execute operation with retry logic for handling transient failures
+     * Removes all bot participants with proper error handling
      */
-    private <T> T executeWithRetry(java.util.concurrent.Callable<T> operation) {
-        Exception lastException = null;
+    @CacheEvict(value = "conferences", key = "#conferenceSid")
+    public void removeAllBotParticipants(String conferenceSid) {
+        Set<String> botCallSids = conferenceBotsMap.get(conferenceSid);
         
-        for (int attempt = 1; attempt <= MAX_RETRY_ATTEMPTS; attempt++) {
-            try {
-                return operation.call();
-            } catch (Exception e) {
-                lastException = e;
-                logger.warn("Attempt {} failed: {}", attempt, e.getMessage());
-                
-                if (attempt < MAX_RETRY_ATTEMPTS) {
+        if (botCallSids == null || botCallSids.isEmpty()) {
+            logger.debug("No tracked bot participants found for conference {}", conferenceSid);
+            return;
+        }
+
+        List<CompletableFuture<Void>> removals = botCallSids.stream()
+                .map(callSid -> CompletableFuture.runAsync(() -> {
                     try {
-                        TimeUnit.MILLISECONDS.sleep(RETRY_DELAY_MS * attempt);
-                    } catch (InterruptedException ie) {
-                        Thread.currentThread().interrupt();
-                        break;
+                        removeBotParticipant(conferenceSid, callSid);
+                    } catch (Exception e) {
+                        logger.warn("Failed to remove bot participant {}: {}", callSid, e.getMessage());
+                    }
+                }, executorService))
+                .collect(Collectors.toList());
+
+        try {
+            // Wait for all removals to complete
+            CompletableFuture.allOf(removals.toArray(new CompletableFuture[0]))
+                    .get(30, TimeUnit.SECONDS);
+                    
+            logger.info("Removed {} bot participants from conference {}", 
+                       removals.size(), conferenceSid);
+                       
+        } catch (Exception e) {
+            logger.error("Error during bulk bot removal for conference {}: {}", 
+                        conferenceSid, e.getMessage());
+        }
+    }
+
+    /**
+     * Enhanced conference activity check
+     */
+    public boolean hasActiveParticipants(String conferenceSid) {
+        try {
+            Conference conference = getConference(conferenceSid);
+            if (conference == null) {
+                return false;
+            }
+            
+            // Check if conference is active and has participants
+            return "in-progress".equals(conference.getStatus().toString()) && 
+                   !getConferenceParticipants(conferenceSid).isEmpty();
+                   
+        } catch (Exception e) {
+            logger.error("Error checking active participants for conference {}: {}", 
+                        conferenceSid, e.getMessage());
+            return false;
+        }
+    }
+
+    /**
+     * Enhanced conference ending with proper cleanup
+     */
+    @CacheEvict(value = "conferences", key = "#conferenceSid")
+    public void endConference(String conferenceSid) {
+        try {
+            logger.info("Ending conference: {}", conferenceSid);
+            
+            // First remove all bot participants
+            removeAllBotParticipants(conferenceSid);
+            
+            // Then remove human participants
+            List<Participant> participants = getConferenceParticipants(conferenceSid);
+            
+            for (Participant participant : participants) {
+                if (!isBotParticipant(participant)) {
+                    try {
+                        Participant.deleter(conferenceSid, participant.getCallSid()).delete();
+                    } catch (Exception e) {
+                        logger.warn("Failed to remove participant {}: {}", 
+                                   participant.getCallSid(), e.getMessage());
                     }
                 }
             }
+            
+            logger.info("Conference {} ended successfully", conferenceSid);
+            
+        } catch (Exception e) {
+            logger.error("Error ending conference {}: {}", conferenceSid, e.getMessage());
+        }
+    }
+
+    /**
+     * Health check method
+     */
+    public boolean isHealthy() {
+        try {
+            // Try a simple API call to verify connectivity
+            Twilio.getRestClient().getAccountSid();
+            return true;
+        } catch (Exception e) {
+            logger.error("Health check failed: {}", e.getMessage());
+            return false;
+        }
+    }
+
+    /**
+     * Get bot participant statistics
+     */
+    public BotParticipantStats getStats() {
+        return new BotParticipantStats(
+            activeBots.size(),
+            conferenceBotsMap.size(),
+            maxConcurrentBots,
+            rateLimiter.availablePermits()
+        );
+    }
+
+    // Helper methods
+
+    private String buildSecureWebhookUrl(String conferenceName, String targetLanguage, String sourceLanguage) {
+        String timestamp = String.valueOf(System.currentTimeMillis());
+        String token = twilioSecurityService.generateWebhookToken(conferenceName + ":" + timestamp);
+        
+        return String.format("%s/webhook/bot?conferenceName=%s&targetLanguage=%s&sourceLanguage=%s&timestamp=%s&token=%s",
+                baseUrl, conferenceName, targetLanguage, sourceLanguage, timestamp, token);
+    }
+
+    private boolean isValidLanguage(String language) {
+        if (!StringUtils.hasText(language)) {
+            return false;
         }
         
-        logger.error("All {} attempts failed", MAX_RETRY_ATTEMPTS);
-        throw new RuntimeException("Operation failed after " + MAX_RETRY_ATTEMPTS + " attempts", lastException);
+        // Define supported languages
+        Set<String> supportedLanguages = Set.of(
+            "english", "spanish", "french", "german", "italian", 
+            "portuguese", "chinese", "japanese", "korean", "arabic"
+        );
+        
+        return supportedLanguages.contains(language.toLowerCase());
+    }
+
+    private void cleanupAllBotParticipants() {
+        logger.info("Cleaning up all bot participants...");
+        
+        activeBots.keySet().parallelStream().forEach(callSid -> {
+            try {
+                BotParticipantInfo botInfo = activeBots.get(callSid);
+                if (botInfo != null) {
+                    // Try to end the call gracefully
+                    Call.updater(callSid).setStatus(Call.UpdateStatus.COMPLETED).update();
+                }
+            } catch (Exception e) {
+                logger.debug("Failed to cleanup bot participant {}: {}", callSid, e.getMessage());
+            }
+        });
+        
+        activeBots.clear();
+        conferenceBotsMap.clear();
+    }
+
+    // Inner classes for data structures
+
+    public static class BotParticipantInfo {
+        private final String callSid;
+        private final String conferenceName;
+        private final String targetLanguage;
+        private final String sourceLanguage;
+        private final LocalDateTime createdAt;
+
+        public BotParticipantInfo(String callSid, String conferenceName, 
+                                String targetLanguage, String sourceLanguage, 
+                                LocalDateTime createdAt) {
+            this.callSid = callSid;
+            this.conferenceName = conferenceName;
+            this.targetLanguage = targetLanguage;
+            this.sourceLanguage = sourceLanguage;
+            this.createdAt = createdAt;
+        }
+
+        // Getters
+        public String getCallSid() { return callSid; }
+        public String getConferenceName() { return conferenceName; }
+        public String getTargetLanguage() { return targetLanguage; }
+        public String getSourceLanguage() { return sourceLanguage; }
+        public LocalDateTime getCreatedAt() { return createdAt; }
+    }
+
+    public static class BotParticipantStats {
+        private final int activeBots;
+        private final int activeConferences;
+        private final int maxConcurrentBots;
+        private final int availableRateLimit;
+
+        public BotParticipantStats(int activeBots, int activeConferences, 
+                                 int maxConcurrentBots, int availableRateLimit) {
+            this.activeBots = activeBots;
+            this.activeConferences = activeConferences;
+            this.maxConcurrentBots = maxConcurrentBots;
+            this.availableRateLimit = availableRateLimit;
+        }
+
+        // Getters
+        public int getActiveBots() { return activeBots; }
+        public int getActiveConferences() { return activeConferences; }
+        public int getMaxConcurrentBots() { return maxConcurrentBots; }
+        public int getAvailableRateLimit() { return availableRateLimit; }
     }
 }
