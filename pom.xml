@@ -15,7 +15,6 @@
     <description>Real-time translation call application with Twilio and OpenAI</description>
     <properties>
         <java.version>17</java.version>
-        <resilience4j.version>2.1.0</resilience4j.version>
     </properties>
     
     <dependencies>
@@ -98,11 +97,11 @@
             <artifactId>jackson-datatype-jsr310</artifactId>
         </dependency>
 
-        <!-- Twilio SDK -->
+        <!-- Twilio SDK - UPDATED TO 10.5.1 -->
         <dependency>
             <groupId>com.twilio.sdk</groupId>
             <artifactId>twilio</artifactId>
-            <version>9.14.1</version>
+            <version>10.5.1</version>
         </dependency>
 
         <!-- OpenAI Integration -->
@@ -126,45 +125,7 @@
             <scope>runtime</scope>
         </dependency>
 
-        <!-- HTTP Client -->
-        <dependency>
-            <groupId>org.apache.httpcomponents</groupId>
-            <artifactId>httpclient</artifactId>
-        </dependency>
-
-        <!-- Circuit Breaker and Resilience -->
-        <dependency>
-            <groupId>io.github.resilience4j</groupId>
-            <artifactId>resilience4j-spring-boot3</artifactId>
-            <version>${resilience4j.version}</version>
-        </dependency>
-        
-        <dependency>
-            <groupId>io.github.resilience4j</groupId>
-            <artifactId>resilience4j-circuitbreaker</artifactId>
-            <version>${resilience4j.version}</version>
-        </dependency>
-        
-        <dependency>
-            <groupId>io.github.resilience4j</groupId>
-            <artifactId>resilience4j-retry</artifactId>
-            <version>${resilience4j.version}</version>
-        </dependency>
-        
-        <dependency>
-            <groupId>io.github.resilience4j</groupId>
-            <artifactId>resilience4j-micrometer</artifactId>
-            <version>${resilience4j.version}</version>
-        </dependency>
-
-        <!-- Rate Limiting (Optional - for advanced rate limiting) -->
-        <dependency>
-            <groupId>com.github.vladimir-bukhtoyarov</groupId>
-            <artifactId>bucket4j-core</artifactId>
-            <version>7.6.0</version>
-        </dependency>
-
-        <!-- WebSocket for streaming -->
+        <!-- HTTP Client 5 - REMOVED OLD HTTPCLIENT -->
         <dependency>
             <groupId>org.apache.httpcomponents.client5</groupId>
             <artifactId>httpclient5</artifactId>

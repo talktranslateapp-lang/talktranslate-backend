@@ -7,8 +7,6 @@ import com.twilio.rest.api.v2010.account.Call;
 import com.twilio.rest.api.v2010.account.Conference;
 import com.twilio.rest.api.v2010.account.conference.Participant;
 import com.twilio.type.PhoneNumber;
-import io.github.resilience4j.circuitbreaker.annotation.CircuitBreaker;
-import io.github.resilience4j.retry.annotation.Retry;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Autowired;
@@ -22,7 +20,6 @@ import jakarta.annotation.PostConstruct;
 import jakarta.annotation.PreDestroy;
 import java.net.URI;
 import java.time.LocalDateTime;
-import java.time.format.DateTimeFormatter;
 import java.util.*;
 import java.util.concurrent.*;
 import java.util.stream.Collectors;
@@ -31,7 +28,6 @@ import java.util.stream.Collectors;
 public class BotParticipantService {
 
     private static final Logger logger = LoggerFactory.getLogger(BotParticipantService.class);
-    private static final String CIRCUIT_BREAKER_NAME = "twilioApi";
     private static final int MAX_PARTICIPANTS_PER_PAGE = 50;
     private static final int DEFAULT_TIMEOUT_SECONDS = 30;
 
@@ -63,7 +59,7 @@ public class BotParticipantService {
     private ExecutorService executorService;
     
     // Rate limiting
-    private final Semaphore rateLimiter = new Semaphore(60); // 60 calls per minute
+    private final Semaphore rateLimiter = new Semaphore(60);
     private final ScheduledExecutorService rateLimiterReset = Executors.newSingleThreadScheduledExecutor();
     
     // Bot participant tracking
@@ -116,10 +112,8 @@ public class BotParticipantService {
     }
 
     /**
-     * Creates a bot participant with enhanced security and monitoring
+     * Creates a bot participant with Twilio 10.x API
      */
-    @CircuitBreaker(name = CIRCUIT_BREAKER_NAME, fallbackMethod = "createBotParticipantFallback")
-    @Retry(name = CIRCUIT_BREAKER_NAME)
     public CompletableFuture<String> createBotParticipantAsync(String conferenceName, 
                                                               String targetLanguage, 
                                                               String sourceLanguage) {
@@ -134,7 +128,7 @@ public class BotParticipantService {
     }
 
     /**
-     * Creates a bot participant call and adds it to the specified conference
+     * Creates a bot participant call using Twilio 10.x API
      */
     public String createBotParticipant(String conferenceName, String targetLanguage, String sourceLanguage) {
         // Validate inputs
@@ -163,7 +157,7 @@ public class BotParticipantService {
             String webhookUrl = buildSecureWebhookUrl(conferenceName, targetLanguage, sourceLanguage);
             String statusCallbackUrl = baseUrl + "/webhook/bot/status";
 
-            // Create the bot call
+            // Create the bot call using Twilio 10.x API
             Call call = Call.creator(
                     new PhoneNumber(twilioPhoneNumber), // To
                     new PhoneNumber(twilioPhoneNumber), // From
@@ -171,7 +165,13 @@ public class BotParticipantService {
             )
             .setMethod(HttpMethod.POST)
             .setStatusCallback(URI.create(statusCallbackUrl))
-            .setStatusCallbackEvent(Arrays.asList("initiated", "ringing", "answered", "completed", "failed"))
+            .setStatusCallbackEvent(Arrays.asList(
+                Call.Event.INITIATED.toString(),
+                Call.Event.RINGING.toString(), 
+                Call.Event.ANSWERED.toString(),
+                Call.Event.COMPLETED.toString(),
+                Call.Event.FAILED.toString()
+            ))
             .setStatusCallbackMethod(HttpMethod.POST)
             .setTimeout(DEFAULT_TIMEOUT_SECONDS)
             .create();
@@ -201,24 +201,13 @@ public class BotParticipantService {
     }
 
     /**
-     * Fallback method for circuit breaker
+     * Removes a bot participant using Twilio 10.x API
      */
-    public String createBotParticipantFallback(String conferenceName, String targetLanguage, 
-                                             String sourceLanguage, Exception ex) {
-        logger.warn("Bot participant creation fallback triggered for conference {}: {}", 
-                   conferenceName, ex.getMessage());
-        throw new RuntimeException("Bot participant service temporarily unavailable", ex);
-    }
-
-    /**
-     * Removes a bot participant with proper cleanup
-     */
-    @CircuitBreaker(name = CIRCUIT_BREAKER_NAME)
     public void removeBotParticipant(String conferenceSid, String participantCallSid) {
         try {
             logger.info("Removing bot participant {} from conference {}", participantCallSid, conferenceSid);
 
-            // Find and remove from conference
+            // In Twilio 10.x, use the participant call SID directly
             Participant.deleter(conferenceSid, participantCallSid).delete();
 
             // Clean up tracking
@@ -247,10 +236,8 @@ public class BotParticipantService {
     }
 
     /**
-     * Updates bot participant configuration with retry logic
+     * Updates bot participant using Twilio 10.x API
      */
-    @CircuitBreaker(name = CIRCUIT_BREAKER_NAME)
-    @Retry(name = CIRCUIT_BREAKER_NAME)
     public void updateBotParticipant(String conferenceSid, String participantCallSid, boolean muted) {
         try {
             logger.info("Updating bot participant {} in conference {}, muted: {}", 
@@ -274,10 +261,9 @@ public class BotParticipantService {
     }
 
     /**
-     * Gets conference information with caching
+     * Gets conference information with Twilio 10.x API
      */
     @Cacheable(value = "conferences", key = "#conferenceSid")
-    @CircuitBreaker(name = CIRCUIT_BREAKER_NAME)
     public Conference getConference(String conferenceSid) {
         try {
             return Conference.fetcher(conferenceSid).fetch();
@@ -296,19 +282,20 @@ public class BotParticipantService {
     }
 
     /**
-     * Lists all participants with pagination support
+     * Lists all participants using Twilio 10.x API with proper pagination
      */
-    @CircuitBreaker(name = CIRCUIT_BREAKER_NAME)
     public List<Participant> getConferenceParticipants(String conferenceSid) {
         try {
             logger.debug("Fetching participants for conference: {}", conferenceSid);
             
             List<Participant> allParticipants = new ArrayList<>();
             
-            // Use pagination for better performance
-            for (Participant participant : Participant.reader(conferenceSid)
+            // Twilio 10.x uses ResourceSet which implements Iterable
+            Iterable<Participant> participants = Participant.reader(conferenceSid)
                     .limit(MAX_PARTICIPANTS_PER_PAGE)
-                    .read()) {
+                    .read();
+            
+            for (Participant participant : participants) {
                 allParticipants.add(participant);
             }
             
@@ -330,7 +317,7 @@ public class BotParticipantService {
     }
 
     /**
-     * Enhanced bot participant detection with better logic
+     * Enhanced bot participant detection
      */
     public List<String> findBotParticipants(String conferenceSid) {
         try {
@@ -348,7 +335,7 @@ public class BotParticipantService {
     }
 
     /**
-     * Improved bot detection logic
+     * Improved bot detection logic for Twilio 10.x
      */
     private boolean isBotParticipant(Participant participant) {
         try {
@@ -358,12 +345,10 @@ public class BotParticipantService {
             }
             
             // Fallback: check if calling from our number to itself
-            PhoneNumber from = participant.getFrom();
-            PhoneNumber to = participant.getTo();
+            String from = participant.getFrom() != null ? participant.getFrom().toString() : "";
+            String to = participant.getTo() != null ? participant.getTo().toString() : "";
             
-            return from != null && to != null &&
-                   twilioPhoneNumber.equals(from.toString()) && 
-                   twilioPhoneNumber.equals(to.toString());
+            return twilioPhoneNumber.equals(from) && twilioPhoneNumber.equals(to);
                    
         } catch (Exception e) {
             logger.debug("Error checking if participant {} is bot: {}", 
@@ -409,7 +394,7 @@ public class BotParticipantService {
     }
 
     /**
-     * Enhanced conference activity check
+     * Enhanced conference activity check for Twilio 10.x
      */
     public boolean hasActiveParticipants(String conferenceSid) {
         try {
@@ -419,7 +404,7 @@ public class BotParticipantService {
             }
             
             // Check if conference is active and has participants
-            return "in-progress".equals(conference.getStatus().toString()) && 
+            return Conference.Status.IN_PROGRESS.equals(conference.getStatus()) && 
                    !getConferenceParticipants(conferenceSid).isEmpty();
                    
         } catch (Exception e) {
@@ -518,7 +503,7 @@ public class BotParticipantService {
             try {
                 BotParticipantInfo botInfo = activeBots.get(callSid);
                 if (botInfo != null) {
-                    // Try to end the call gracefully
+                    // Try to end the call gracefully using Twilio 10.x API
                     Call.updater(callSid).setStatus(Call.UpdateStatus.COMPLETED).update();
                 }
             } catch (Exception e) {
@@ -530,7 +515,7 @@ public class BotParticipantService {
         conferenceBotsMap.clear();
     }
 
-    // Inner classes for data structures
+    // Inner classes for data structures (unchanged)
 
     public static class BotParticipantInfo {
         private final String callSid;

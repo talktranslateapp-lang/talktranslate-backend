@@ -2,6 +2,7 @@ package com.example.translationcallapp.controller;
 
 import com.example.translationcallapp.service.BotParticipantService;
 import com.example.translationcallapp.service.SecureConferenceService;
+import com.example.translationcallapp.service.TwilioSecurityService;
 import com.twilio.twiml.VoiceResponse;
 import com.twilio.twiml.voice.Conference;
 import com.twilio.twiml.voice.Start;
@@ -31,11 +32,13 @@ public class BotWebhookController {
     private SecureConferenceService secureConferenceService;
 
     @Autowired
-    private BotParticipantService botParticipantService; // Fixed: Added missing injection
+    private BotParticipantService botParticipantService;
+
+    @Autowired
+    private TwilioSecurityService twilioSecurityService;
 
     /**
-     * Webhook endpoint for bot participants
-     * Returns TwiML to join the bot to a conference and optionally start media streaming
+     * Webhook endpoint for bot participants using Twilio 10.x TwiML
      */
     @RequestMapping(value = "/bot", method = {RequestMethod.GET, RequestMethod.POST}, 
             produces = MediaType.APPLICATION_XML_VALUE)
@@ -43,12 +46,20 @@ public class BotWebhookController {
                            @RequestParam(required = false) String targetLanguage,
                            @RequestParam(required = false) String sourceLanguage,
                            @RequestParam(required = false) String token,
+                           HttpServletRequest request,
                            HttpServletResponse response) {
         
         logger.info("Bot webhook called - Conference: {}, Target: {}, Source: {}", 
                    conferenceName, targetLanguage, sourceLanguage);
 
         try {
+            // Validate request came from Twilio
+            if (!twilioSecurityService.validateTwilioRequest(request)) {
+                logger.warn("Invalid Twilio request signature");
+                response.setStatus(HttpServletResponse.SC_FORBIDDEN);
+                return buildErrorResponse("Invalid request signature");
+            }
+
             // Validate security token if provided
             if (token != null && !validateWebhookToken(conferenceName, token)) {
                 logger.warn("Invalid webhook token for conference: {}", conferenceName);
@@ -63,18 +74,18 @@ public class BotWebhookController {
                 return buildErrorResponse("Invalid conference name");
             }
 
-            // Build TwiML response
+            // Build TwiML response using Twilio 10.x API
             VoiceResponse.Builder responseBuilder = new VoiceResponse.Builder();
 
             if (conferenceName != null) {
-                // Fixed: Remove unsupported statusCallbackEvent method call
-                Conference conference = new Conference.Builder(conferenceName)
+                // Build conference with Twilio 10.x TwiML API
+                Conference.Builder conferenceBuilder = new Conference.Builder(conferenceName)
                         .muted(false)
                         .startConferenceOnEnter(false)
                         .endConferenceOnExit(false)
-                        .waitUrl("http://twimlets.com/holdmusic?Bucket=com.twilio.music.classical")
-                        .build();
+                        .waitUrl("http://twimlets.com/holdmusic?Bucket=com.twilio.music.classical");
 
+                Conference conference = conferenceBuilder.build();
                 responseBuilder.conference(conference);
 
                 // Add media streaming if language parameters are provided
@@ -87,7 +98,7 @@ public class BotWebhookController {
                             .build();
 
                     Start start = new Start.Builder()
-                            .stream(stream) // Fixed: Use stream() method on Start.Builder
+                            .stream(stream)
                             .build();
 
                     responseBuilder.start(start);
@@ -111,19 +122,26 @@ public class BotWebhookController {
     }
 
     /**
-     * Status callback endpoint for bot calls
+     * Status callback endpoint for bot calls using Twilio 10.x webhook format
      */
     @RequestMapping(value = "/bot/status", method = RequestMethod.POST)
     public void botStatusCallback(@RequestParam String CallSid,
                                 @RequestParam String CallStatus,
                                 @RequestParam(required = false) String ConferenceSid,
                                 @RequestParam(required = false) String From,
-                                @RequestParam(required = false) String To) {
+                                @RequestParam(required = false) String To,
+                                HttpServletRequest request) {
         
         logger.info("Bot status callback - Call SID: {}, Status: {}, Conference: {}", 
                    CallSid, CallStatus, ConferenceSid);
 
         try {
+            // Validate request came from Twilio
+            if (!twilioSecurityService.validateTwilioRequest(request)) {
+                logger.warn("Invalid Twilio request signature for status callback");
+                return;
+            }
+
             switch (CallStatus.toLowerCase()) {
                 case "answered":
                     logger.info("Bot call {} answered and joined conference {}", CallSid, ConferenceSid);
@@ -133,6 +151,7 @@ public class BotWebhookController {
                 case "canceled":
                     logger.info("Bot call {} ended with status: {}", CallSid, CallStatus);
                     // Cleanup logic if needed
+                    handleBotCallEnd(CallSid, CallStatus);
                     break;
                 default:
                     logger.debug("Bot call {} status update: {}", CallSid, CallStatus);
@@ -143,18 +162,25 @@ public class BotWebhookController {
     }
 
     /**
-     * Conference status callback endpoint
+     * Conference status callback endpoint using Twilio 10.x webhook format
      */
     @RequestMapping(value = "/conference/status", method = RequestMethod.POST)
     public void conferenceStatusCallback(@RequestParam String ConferenceSid,
                                        @RequestParam String StatusCallbackEvent,
                                        @RequestParam(required = false) String FriendlyName,
-                                       @RequestParam(required = false) String Reason) {
+                                       @RequestParam(required = false) String Reason,
+                                       HttpServletRequest request) {
         
         logger.info("Conference status callback - SID: {}, Event: {}, Name: {}", 
                    ConferenceSid, StatusCallbackEvent, FriendlyName);
 
         try {
+            // Validate request came from Twilio
+            if (!twilioSecurityService.validateTwilioRequest(request)) {
+                logger.warn("Invalid Twilio request signature for conference callback");
+                return;
+            }
+
             switch (StatusCallbackEvent.toLowerCase()) {
                 case "conference-start":
                     logger.info("Conference {} started", ConferenceSid);
@@ -183,19 +209,26 @@ public class BotWebhookController {
     }
 
     /**
-     * Participant status callback endpoint
+     * Participant status callback endpoint using Twilio 10.x webhook format
      */
     @RequestMapping(value = "/participant/status", method = RequestMethod.POST)
     public void participantStatusCallback(@RequestParam String ConferenceSid,
                                         @RequestParam String CallSid,
                                         @RequestParam String StatusCallbackEvent,
                                         @RequestParam(required = false) String Muted,
-                                        @RequestParam(required = false) String Hold) {
+                                        @RequestParam(required = false) String Hold,
+                                        HttpServletRequest request) {
         
         logger.info("Participant status callback - Conference: {}, Call: {}, Event: {}", 
                    ConferenceSid, CallSid, StatusCallbackEvent);
 
         try {
+            // Validate request came from Twilio
+            if (!twilioSecurityService.validateTwilioRequest(request)) {
+                logger.warn("Invalid Twilio request signature for participant callback");
+                return;
+            }
+
             // Log participant events for monitoring
             switch (StatusCallbackEvent.toLowerCase()) {
                 case "participant-join":
@@ -216,6 +249,24 @@ public class BotWebhookController {
             }
         } catch (Exception e) {
             logger.error("Error processing participant status callback: {}", e.getMessage(), e);
+        }
+    }
+
+    /**
+     * Handles bot call end events
+     */
+    private void handleBotCallEnd(String callSid, String callStatus) {
+        try {
+            // Remove from active bots tracking if it exists
+            // This is handled in the BotParticipantService but we can add additional cleanup here
+            logger.debug("Handling bot call end for {}: {}", callSid, callStatus);
+            
+            if ("failed".equalsIgnoreCase(callStatus)) {
+                logger.warn("Bot call {} failed - may need to retry", callSid);
+                // Could implement retry logic here if needed
+            }
+        } catch (Exception e) {
+            logger.error("Error handling bot call end for {}: {}", callSid, e.getMessage());
         }
     }
 
