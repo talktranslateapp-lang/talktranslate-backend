@@ -5,6 +5,8 @@ import com.example.translationcallapp.service.SecureConferenceService;
 import com.example.translationcallapp.service.TwilioSecurityService;
 import com.twilio.twiml.VoiceResponse;
 import com.twilio.twiml.voice.Conference;
+import com.twilio.twiml.voice.Dial;
+import com.twilio.twiml.voice.Say;
 import com.twilio.twiml.voice.Start;
 import com.twilio.twiml.voice.Stream;
 import org.slf4j.Logger;
@@ -78,7 +80,7 @@ public class BotWebhookController {
             VoiceResponse.Builder responseBuilder = new VoiceResponse.Builder();
 
             if (conferenceName != null) {
-                // Build conference with Twilio 10.x TwiML API
+                // Build conference with Twilio 10.x TwiML API - FIXED: Use Dial.Builder
                 Conference.Builder conferenceBuilder = new Conference.Builder(conferenceName)
                         .muted(false)
                         .startConferenceOnEnter(false)
@@ -86,7 +88,13 @@ public class BotWebhookController {
                         .waitUrl("http://twimlets.com/holdmusic?Bucket=com.twilio.music.classical");
 
                 Conference conference = conferenceBuilder.build();
-                responseBuilder.conference(conference);
+                
+                // FIXED: In Twilio 10.x, Conference goes inside a Dial
+                Dial.Builder dialBuilder = new Dial.Builder()
+                        .conference(conference);
+                
+                Dial dial = dialBuilder.build();
+                responseBuilder.dial(dial);
 
                 // Add media streaming if language parameters are provided
                 if (targetLanguage != null && sourceLanguage != null) {
@@ -104,8 +112,9 @@ public class BotWebhookController {
                     responseBuilder.start(start);
                 }
             } else {
-                // Default response when no conference specified
-                responseBuilder.say("Bot participant ready");
+                // Default response when no conference specified - FIXED: Create Say object
+                Say defaultSay = new Say.Builder("Bot participant ready").build();
+                responseBuilder.say(defaultSay);
             }
 
             VoiceResponse voiceResponse = responseBuilder.build();
@@ -343,11 +352,12 @@ public class BotWebhookController {
     }
 
     /**
-     * Builds error response TwiML
+     * Builds error response TwiML - FIXED: Create Say object properly
      */
     private String buildErrorResponse(String message) {
+        Say errorSay = new Say.Builder("Error: " + message).build();
         VoiceResponse response = new VoiceResponse.Builder()
-                .say("Error: " + message)
+                .say(errorSay)
                 .build();
         return response.toXml();
     }
@@ -366,4 +376,3 @@ public class BotWebhookController {
             logger.error("Error during bot participant cleanup for conference {}: {}", conferenceSid, e.getMessage());
         }
     }
-}

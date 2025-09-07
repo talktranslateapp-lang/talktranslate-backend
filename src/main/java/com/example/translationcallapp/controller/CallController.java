@@ -66,11 +66,11 @@ public class CallController {
             logger.info("Starting translation call: {} -> {}, Phone: {}, Conference: {}", 
                        fromLanguage, toLanguage, phoneNumber, secureConferenceSid);
 
-            // Add translation bot to conference
+            // Add translation bot to conference - FIXED: Use correct method name
             String botCallSid = botParticipantService.addTranslationBot(
                 secureConferenceSid, fromLanguage, toLanguage);
 
-            // If phone number provided, add participant
+            // If phone number provided, add participant - FIXED: Use correct method name
             String participantCallSid = null;
             if (phoneNumber != null && !phoneNumber.trim().isEmpty()) {
                 participantCallSid = botParticipantService.addParticipantToConference(
@@ -124,6 +124,81 @@ public class CallController {
                 return ResponseEntity.badRequest().body(response);
             }
 
+            botParticipantService.endConference(conferenceSid);
+            
+            // Also remove from secure conference tracking
+            secureConferenceService.removeConference(conferenceSid);
+
+            response.put("success", true);
+            response.put("message", "Conference ended successfully");
+
+        } catch (Exception e) {
+            logger.error("Failed to end conference: {}", e.getMessage(), e);
+            response.put("success", false);
+            response.put("error", "Failed to end conference: " + e.getMessage());
+            return ResponseEntity.internalServerError().body(response);
+        }
+
+        return ResponseEntity.ok(response);
+    }
+
+    /**
+     * Cleanup expired conferences (can be called periodically)
+     */
+    @PostMapping("/cleanup")
+    public ResponseEntity<Map<String, Object>> cleanupExpiredConferences() {
+        Map<String, Object> response = new HashMap<>();
+        
+        try {
+            secureConferenceService.cleanupExpiredConferences();
+            response.put("success", true);
+            response.put("message", "Cleanup completed");
+
+        } catch (Exception e) {
+            logger.error("Failed to cleanup conferences: {}", e.getMessage(), e);
+            response.put("success", false);
+            response.put("error", "Cleanup failed: " + e.getMessage());
+        }
+
+        return ResponseEntity.ok(response);
+    }
+
+    /**
+     * Get service statistics
+     */
+    @GetMapping("/stats")
+    public ResponseEntity<Map<String, Object>> getServiceStats() {
+        Map<String, Object> response = new HashMap<>();
+        
+        try {
+            var botStats = botParticipantService.getStats();
+            var conferenceStats = secureConferenceService.getConferenceStats();
+            
+            response.put("success", true);
+            response.put("botStats", Map.of(
+                "activeBots", botStats.getActiveBots(),
+                "activeConferences", botStats.getActiveConferences(),
+                "maxConcurrentBots", botStats.getMaxConcurrentBots(),
+                "availableRateLimit", botStats.getAvailableRateLimit()
+            ));
+            response.put("conferenceStats", Map.of(
+                "activeConferences", conferenceStats.getActiveConferences(),
+                "oldestConferenceAgeMinutes", conferenceStats.getOldestConferenceAgeMinutes()
+            ));
+            response.put("serviceHealth", botParticipantService.isHealthy());
+
+        } catch (Exception e) {
+            logger.error("Failed to get service stats: {}", e.getMessage(), e);
+            response.put("success", false);
+            response.put("error", "Failed to get statistics: " + e.getMessage());
+        }
+
+        return ResponseEntity.ok(response);
+    }put("error", "Invalid conference identifier");
+                return ResponseEntity.badRequest().body(response);
+            }
+
+            // FIXED: Use correct method name
             String botCallSid = botParticipantService.addBot(conferenceSid, targetLanguage);
 
             response.put("success", true);
@@ -164,6 +239,7 @@ public class CallController {
                 return ResponseEntity.badRequest().body(response);
             }
 
+            // FIXED: Use correct method name
             String participantCallSid = botParticipantService.addParticipantToConference(
                 conferenceSid, phoneNumber);
 
@@ -197,13 +273,19 @@ public class CallController {
             }
 
             var participants = botParticipantService.getConferenceParticipants(conferenceSid);
+            // FIXED: Use correct method name
             var conferenceInfo = botParticipantService.getConferenceInfo(conferenceSid);
             var metadata = secureConferenceService.getConferenceMetadata(conferenceSid);
 
             response.put("success", true);
             response.put("conferenceSid", conferenceSid);
             response.put("participantCount", participants.size());
-            response.put("status", conferenceInfo.getStatus());
+            
+            if (conferenceInfo != null) {
+                response.put("status", conferenceInfo.getStatus());
+            } else {
+                response.put("status", "not_found");
+            }
             
             if (metadata != null) {
                 response.put("sourceLanguage", metadata.getSourceLanguage());
@@ -232,43 +314,4 @@ public class CallController {
             // Validate conference name format
             if (!secureConferenceService.isValidConferenceName(conferenceSid)) {
                 response.put("success", false);
-                response.put("error", "Invalid conference identifier");
-                return ResponseEntity.badRequest().body(response);
-            }
-
-            botParticipantService.endConference(conferenceSid);
-
-            response.put("success", true);
-            response.put("message", "Conference ended successfully");
-
-        } catch (Exception e) {
-            logger.error("Failed to end conference: {}", e.getMessage(), e);
-            response.put("success", false);
-            response.put("error", "Failed to end conference: " + e.getMessage());
-            return ResponseEntity.internalServerError().body(response);
-        }
-
-        return ResponseEntity.ok(response);
-    }
-
-    /**
-     * Cleanup expired conferences (can be called periodically)
-     */
-    @PostMapping("/cleanup")
-    public ResponseEntity<Map<String, Object>> cleanupExpiredConferences() {
-        Map<String, Object> response = new HashMap<>();
-        
-        try {
-            secureConferenceService.cleanupExpiredConferences();
-            response.put("success", true);
-            response.put("message", "Cleanup completed");
-
-        } catch (Exception e) {
-            logger.error("Failed to cleanup conferences: {}", e.getMessage(), e);
-            response.put("success", false);
-            response.put("error", "Cleanup failed: " + e.getMessage());
-        }
-
-        return ResponseEntity.ok(response);
-    }
-}
+                response.

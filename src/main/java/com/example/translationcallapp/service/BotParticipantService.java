@@ -65,6 +65,9 @@ public class BotParticipantService {
     // Bot participant tracking
     private final ConcurrentHashMap<String, BotParticipantInfo> activeBots = new ConcurrentHashMap<>();
     private final ConcurrentHashMap<String, Set<String>> conferenceBotsMap = new ConcurrentHashMap<>();
+    
+    // Participant metadata tracking (replacement for getFrom/getTo)
+    private final ConcurrentHashMap<String, ParticipantMetadata> participantMetadata = new ConcurrentHashMap<>();
 
     @PostConstruct
     public void init() {
@@ -109,6 +112,80 @@ public class BotParticipantService {
         } catch (Exception e) {
             logger.error("Error during BotParticipantService cleanup: {}", e.getMessage(), e);
         }
+    }
+
+    /**
+     * Add translation bot - implements missing method for CallController
+     */
+    public String addTranslationBot(String conferenceSid, String fromLanguage, String toLanguage) {
+        return createBotParticipant(conferenceSid, toLanguage, fromLanguage);
+    }
+
+    /**
+     * Add participant to conference - implements missing method for CallController
+     */
+    public String addParticipantToConference(String conferenceSid, String phoneNumber) {
+        try {
+            logger.info("Adding participant {} to conference {}", phoneNumber, conferenceSid);
+
+            // Check rate limiting
+            if (!rateLimiter.tryAcquire()) {
+                throw new RuntimeException("Rate limit exceeded for participant creation");
+            }
+
+            String webhookUrl = baseUrl + "/webhook/participant?conferenceName=" + conferenceSid;
+            String statusCallbackUrl = baseUrl + "/webhook/participant/status";
+
+            // Create the participant call using Twilio 10.x API
+            Call call = Call.creator(
+                    new PhoneNumber(phoneNumber), // To
+                    new PhoneNumber(twilioPhoneNumber), // From
+                    URI.create(webhookUrl)
+            )
+            .setMethod(HttpMethod.POST)
+            .setStatusCallback(URI.create(statusCallbackUrl))
+            .setStatusCallbackEvent(Arrays.asList(
+                "initiated",
+                "ringing", 
+                "answered",
+                "completed",
+                "failed"
+            ))
+            .setStatusCallbackMethod(HttpMethod.POST)
+            .setTimeout(DEFAULT_TIMEOUT_SECONDS)
+            .create();
+
+            // Store participant metadata
+            participantMetadata.put(call.getSid(), new ParticipantMetadata(
+                call.getSid(), phoneNumber, twilioPhoneNumber, conferenceSid, false, LocalDateTime.now()
+            ));
+
+            logger.info("Participant call created with SID: {} for conference: {}", 
+                       call.getSid(), conferenceSid);
+            
+            return call.getSid();
+
+        } catch (ApiException e) {
+            logger.error("Twilio API error creating participant: {} (Code: {})", e.getMessage(), e.getCode());
+            throw new RuntimeException("Failed to create participant: " + e.getMessage(), e);
+        } catch (Exception e) {
+            logger.error("Error creating participant for conference {}: {}", conferenceSid, e.getMessage(), e);
+            throw new RuntimeException("Failed to create participant", e);
+        }
+    }
+
+    /**
+     * Add bot - implements missing method for CallController
+     */
+    public String addBot(String conferenceSid, String targetLanguage) {
+        return createBotParticipant(conferenceSid, targetLanguage, "english");
+    }
+
+    /**
+     * Get conference info - implements missing method for CallController
+     */
+    public Conference getConferenceInfo(String conferenceSid) {
+        return getConference(conferenceSid);
     }
 
     /**
@@ -166,11 +243,11 @@ public class BotParticipantService {
             .setMethod(HttpMethod.POST)
             .setStatusCallback(URI.create(statusCallbackUrl))
             .setStatusCallbackEvent(Arrays.asList(
-                Call.Event.INITIATED.toString(),
-                Call.Event.RINGING.toString(), 
-                Call.Event.ANSWERED.toString(),
-                Call.Event.COMPLETED.toString(),
-                Call.Event.FAILED.toString()
+                "initiated",
+                "ringing", 
+                "answered",
+                "completed",
+                "failed"
             ))
             .setStatusCallbackMethod(HttpMethod.POST)
             .setTimeout(DEFAULT_TIMEOUT_SECONDS)
@@ -185,6 +262,11 @@ public class BotParticipantService {
             // Update conference -> bots mapping
             conferenceBotsMap.computeIfAbsent(conferenceName, k -> ConcurrentHashMap.newKeySet())
                            .add(call.getSid());
+
+            // Store participant metadata for bot detection
+            participantMetadata.put(call.getSid(), new ParticipantMetadata(
+                call.getSid(), twilioPhoneNumber, twilioPhoneNumber, conferenceName, true, LocalDateTime.now()
+            ));
 
             logger.info("Bot participant call created with SID: {} for conference: {}", 
                        call.getSid(), conferenceName);
@@ -212,6 +294,8 @@ public class BotParticipantService {
 
             // Clean up tracking
             BotParticipantInfo botInfo = activeBots.remove(participantCallSid);
+            participantMetadata.remove(participantCallSid);
+            
             if (botInfo != null) {
                 Set<String> conferenceBots = conferenceBotsMap.get(botInfo.getConferenceName());
                 if (conferenceBots != null) {
@@ -317,7 +401,7 @@ public class BotParticipantService {
     }
 
     /**
-     * Enhanced bot participant detection
+     * Enhanced bot participant detection - uses metadata instead of getFrom/getTo
      */
     public List<String> findBotParticipants(String conferenceSid) {
         try {
@@ -335,7 +419,7 @@ public class BotParticipantService {
     }
 
     /**
-     * Improved bot detection logic for Twilio 10.x
+     * Improved bot detection logic for Twilio 10.x - uses stored metadata
      */
     private boolean isBotParticipant(Participant participant) {
         try {
@@ -344,11 +428,13 @@ public class BotParticipantService {
                 return true;
             }
             
-            // Fallback: check if calling from our number to itself
-            String from = participant.getFrom() != null ? participant.getFrom().toString() : "";
-            String to = participant.getTo() != null ? participant.getTo().toString() : "";
+            // Check stored metadata
+            ParticipantMetadata metadata = participantMetadata.get(participant.getCallSid());
+            if (metadata != null) {
+                return metadata.isBot();
+            }
             
-            return twilioPhoneNumber.equals(from) && twilioPhoneNumber.equals(to);
+            return false;
                    
         } catch (Exception e) {
             logger.debug("Error checking if participant {} is bot: {}", 
@@ -432,6 +518,7 @@ public class BotParticipantService {
                 if (!isBotParticipant(participant)) {
                     try {
                         Participant.deleter(conferenceSid, participant.getCallSid()).delete();
+                        participantMetadata.remove(participant.getCallSid());
                     } catch (Exception e) {
                         logger.warn("Failed to remove participant {}: {}", 
                                    participant.getCallSid(), e.getMessage());
@@ -513,9 +600,10 @@ public class BotParticipantService {
         
         activeBots.clear();
         conferenceBotsMap.clear();
+        participantMetadata.clear();
     }
 
-    // Inner classes for data structures (unchanged)
+    // Inner classes for data structures
 
     public static class BotParticipantInfo {
         private final String callSid;
@@ -561,5 +649,33 @@ public class BotParticipantService {
         public int getActiveConferences() { return activeConferences; }
         public int getMaxConcurrentBots() { return maxConcurrentBots; }
         public int getAvailableRateLimit() { return availableRateLimit; }
+    }
+
+    // New class to replace getFrom/getTo functionality
+    public static class ParticipantMetadata {
+        private final String callSid;
+        private final String fromNumber;
+        private final String toNumber;
+        private final String conferenceSid;
+        private final boolean isBot;
+        private final LocalDateTime createdAt;
+
+        public ParticipantMetadata(String callSid, String fromNumber, String toNumber, 
+                                 String conferenceSid, boolean isBot, LocalDateTime createdAt) {
+            this.callSid = callSid;
+            this.fromNumber = fromNumber;
+            this.toNumber = toNumber;
+            this.conferenceSid = conferenceSid;
+            this.isBot = isBot;
+            this.createdAt = createdAt;
+        }
+
+        // Getters
+        public String getCallSid() { return callSid; }
+        public String getFromNumber() { return fromNumber; }
+        public String getToNumber() { return toNumber; }
+        public String getConferenceSid() { return conferenceSid; }
+        public boolean isBot() { return isBot; }
+        public LocalDateTime getCreatedAt() { return createdAt; }
     }
 }

@@ -70,20 +70,72 @@ public class SecureConferenceService {
     }
 
     /**
+     * Remove conference from tracking - FIXED: Added missing method
+     */
+    public boolean removeConference(String secureConferenceName) {
+        try {
+            logger.info("Removing conference from tracking: {}", secureConferenceName);
+            
+            ConferenceMetadata metadata = conferenceMetadata.remove(secureConferenceName);
+            if (metadata != null) {
+                String internalId = metadata.getInternalId();
+                conferenceMapping.remove(internalId);
+                logger.info("Successfully removed conference: {} (internal ID: {})", secureConferenceName, internalId);
+                return true;
+            } else {
+                logger.warn("Conference not found in metadata: {}", secureConferenceName);
+                return false;
+            }
+            
+        } catch (Exception e) {
+            logger.error("Error removing conference {}: {}", secureConferenceName, e.getMessage(), e);
+            return false;
+        }
+    }
+
+    /**
+     * Remove conference by internal ID
+     */
+    public boolean removeConferenceByInternalId(String internalId) {
+        try {
+            String secureConferenceName = conferenceMapping.get(internalId);
+            if (secureConferenceName != null) {
+                return removeConference(secureConferenceName);
+            } else {
+                logger.warn("No secure conference name found for internal ID: {}", internalId);
+                return false;
+            }
+        } catch (Exception e) {
+            logger.error("Error removing conference by internal ID {}: {}", internalId, e.getMessage(), e);
+            return false;
+        }
+    }
+
+    /**
      * Clean up expired conference mappings (older than 24 hours)
      */
     public void cleanupExpiredConferences() {
         long cutoffTime = System.currentTimeMillis() - (24 * 60 * 60 * 1000); // 24 hours
+        int removedCount = 0;
         
-        conferenceMetadata.entrySet().removeIf(entry -> {
-            if (entry.getValue().getCreatedAt() < cutoffTime) {
-                String internalId = entry.getValue().getInternalId();
-                conferenceMapping.remove(internalId);
-                logger.info("Cleaned up expired conference: {}", entry.getKey());
-                return true;
+        try {
+            conferenceMetadata.entrySet().removeIf(entry -> {
+                if (entry.getValue().getCreatedAt() < cutoffTime) {
+                    String internalId = entry.getValue().getInternalId();
+                    conferenceMapping.remove(internalId);
+                    logger.debug("Cleaned up expired conference: {}", entry.getKey());
+                    return true;
+                }
+                return false;
+            });
+            
+            if (removedCount > 0) {
+                logger.info("Cleanup completed - removed {} expired conferences", removedCount);
             }
-            return false;
-        });
+            
+        } catch (Exception e) {
+            logger.error("Error during conference cleanup: {}", e.getMessage(), e);
+        }
     }
 
     /**
@@ -94,6 +146,47 @@ public class SecureConferenceService {
                conferenceName.startsWith("conf-") && 
                conferenceName.length() > 10 &&
                conferenceMetadata.containsKey(conferenceName);
+    }
+
+    /**
+     * Get all active conferences count
+     */
+    public int getActiveConferenceCount() {
+        return conferenceMetadata.size();
+    }
+
+    /**
+     * Check if conference exists
+     */
+    public boolean conferenceExists(String secureConferenceName) {
+        return conferenceMetadata.containsKey(secureConferenceName);
+    }
+
+    /**
+     * Get conference age in minutes
+     */
+    public long getConferenceAgeMinutes(String secureConferenceName) {
+        ConferenceMetadata metadata = conferenceMetadata.get(secureConferenceName);
+        if (metadata != null) {
+            long ageMs = System.currentTimeMillis() - metadata.getCreatedAt();
+            return ageMs / (60 * 1000); // Convert to minutes
+        }
+        return -1;
+    }
+
+    /**
+     * Get conference stats for monitoring
+     */
+    public ConferenceStats getConferenceStats() {
+        int activeCount = conferenceMetadata.size();
+        long oldestTimestamp = conferenceMetadata.values().stream()
+                .mapToLong(ConferenceMetadata::getCreatedAt)
+                .min()
+                .orElse(System.currentTimeMillis());
+        
+        long oldestAgeMinutes = (System.currentTimeMillis() - oldestTimestamp) / (60 * 1000);
+        
+        return new ConferenceStats(activeCount, oldestAgeMinutes);
     }
 
     /**
@@ -116,5 +209,21 @@ public class SecureConferenceService {
         public String getSourceLanguage() { return sourceLanguage; }
         public String getTargetLanguage() { return targetLanguage; }
         public long getCreatedAt() { return createdAt; }
+    }
+
+    /**
+     * Conference statistics container
+     */
+    public static class ConferenceStats {
+        private final int activeConferences;
+        private final long oldestConferenceAgeMinutes;
+
+        public ConferenceStats(int activeConferences, long oldestConferenceAgeMinutes) {
+            this.activeConferences = activeConferences;
+            this.oldestConferenceAgeMinutes = oldestConferenceAgeMinutes;
+        }
+
+        public int getActiveConferences() { return activeConferences; }
+        public long getOldestConferenceAgeMinutes() { return oldestConferenceAgeMinutes; }
     }
 }
