@@ -66,11 +66,11 @@ public class CallController {
             logger.info("Starting translation call: {} -> {}, Phone: {}, Conference: {}", 
                        fromLanguage, toLanguage, phoneNumber, secureConferenceSid);
 
-            // Add translation bot to conference - FIXED: Use correct method name
+            // Add translation bot to conference
             String botCallSid = botParticipantService.addTranslationBot(
                 secureConferenceSid, fromLanguage, toLanguage);
 
-            // If phone number provided, add participant - FIXED: Use correct method name
+            // If phone number provided, add participant
             String participantCallSid = null;
             if (phoneNumber != null && !phoneNumber.trim().isEmpty()) {
                 participantCallSid = botParticipantService.addParticipantToConference(
@@ -117,6 +117,123 @@ public class CallController {
                 return ResponseEntity.badRequest().body(response);
             }
 
+            // Validate conference name format
+            if (!secureConferenceService.isValidConferenceName(conferenceSid)) {
+                response.put("success", false);
+                response.put("error", "Invalid conference identifier");
+                return ResponseEntity.badRequest().body(response);
+            }
+
+            String botCallSid = botParticipantService.addBot(conferenceSid, targetLanguage);
+
+            response.put("success", true);
+            response.put("botCallSid", botCallSid);
+            response.put("conferenceSid", conferenceSid);
+
+        } catch (Exception e) {
+            logger.error("Failed to add bot: {}", e.getMessage(), e);
+            response.put("success", false);
+            response.put("error", "Failed to add translation bot: " + e.getMessage());
+            return ResponseEntity.internalServerError().body(response);
+        }
+
+        return ResponseEntity.ok(response);
+    }
+
+    /**
+     * Add a participant to an existing conference
+     */
+    @PostMapping("/add-participant")
+    public ResponseEntity<Map<String, Object>> addParticipant(@RequestBody Map<String, String> request) {
+        Map<String, Object> response = new HashMap<>();
+        
+        try {
+            String conferenceSid = request.get("conferenceSid");
+            String phoneNumber = request.get("phoneNumber");
+
+            if (conferenceSid == null || phoneNumber == null) {
+                response.put("success", false);
+                response.put("error", "Both conferenceSid and phoneNumber are required");
+                return ResponseEntity.badRequest().body(response);
+            }
+
+            // Validate conference name format
+            if (!secureConferenceService.isValidConferenceName(conferenceSid)) {
+                response.put("success", false);
+                response.put("error", "Invalid conference identifier");
+                return ResponseEntity.badRequest().body(response);
+            }
+
+            String participantCallSid = botParticipantService.addParticipantToConference(
+                conferenceSid, phoneNumber);
+
+            response.put("success", true);
+            response.put("participantCallSid", participantCallSid);
+            response.put("conferenceSid", conferenceSid);
+
+        } catch (Exception e) {
+            logger.error("Failed to add participant: {}", e.getMessage(), e);
+            response.put("success", false);
+            response.put("error", "Failed to add participant: " + e.getMessage());
+            return ResponseEntity.internalServerError().body(response);
+        }
+
+        return ResponseEntity.ok(response);
+    }
+
+    /**
+     * Get conference status and participants
+     */
+    @GetMapping("/conference/{conferenceSid}/status")
+    public ResponseEntity<Map<String, Object>> getConferenceStatus(@PathVariable String conferenceSid) {
+        Map<String, Object> response = new HashMap<>();
+        
+        try {
+            // Validate conference name format
+            if (!secureConferenceService.isValidConferenceName(conferenceSid)) {
+                response.put("success", false);
+                response.put("error", "Invalid conference identifier");
+                return ResponseEntity.badRequest().body(response);
+            }
+
+            var participants = botParticipantService.getConferenceParticipants(conferenceSid);
+            var conferenceInfo = botParticipantService.getConferenceInfo(conferenceSid);
+            var metadata = secureConferenceService.getConferenceMetadata(conferenceSid);
+
+            response.put("success", true);
+            response.put("conferenceSid", conferenceSid);
+            response.put("participantCount", participants.size());
+            
+            if (conferenceInfo != null) {
+                response.put("status", conferenceInfo.getStatus());
+            } else {
+                response.put("status", "not_found");
+            }
+            
+            if (metadata != null) {
+                response.put("sourceLanguage", metadata.getSourceLanguage());
+                response.put("targetLanguage", metadata.getTargetLanguage());
+                response.put("createdAt", metadata.getCreatedAt());
+            }
+
+        } catch (Exception e) {
+            logger.error("Failed to get conference status: {}", e.getMessage(), e);
+            response.put("success", false);
+            response.put("error", "Failed to get conference status: " + e.getMessage());
+            return ResponseEntity.internalServerError().body(response);
+        }
+
+        return ResponseEntity.ok(response);
+    }
+
+    /**
+     * End a conference
+     */
+    @PostMapping("/conference/{conferenceSid}/end")
+    public ResponseEntity<Map<String, Object>> endConference(@PathVariable String conferenceSid) {
+        Map<String, Object> response = new HashMap<>();
+        
+        try {
             // Validate conference name format
             if (!secureConferenceService.isValidConferenceName(conferenceSid)) {
                 response.put("success", false);
@@ -194,124 +311,5 @@ public class CallController {
         }
 
         return ResponseEntity.ok(response);
-    }put("error", "Invalid conference identifier");
-                return ResponseEntity.badRequest().body(response);
-            }
-
-            // FIXED: Use correct method name
-            String botCallSid = botParticipantService.addBot(conferenceSid, targetLanguage);
-
-            response.put("success", true);
-            response.put("botCallSid", botCallSid);
-            response.put("conferenceSid", conferenceSid);
-
-        } catch (Exception e) {
-            logger.error("Failed to add bot: {}", e.getMessage(), e);
-            response.put("success", false);
-            response.put("error", "Failed to add translation bot: " + e.getMessage());
-            return ResponseEntity.internalServerError().body(response);
-        }
-
-        return ResponseEntity.ok(response);
     }
-
-    /**
-     * Add a participant to an existing conference
-     */
-    @PostMapping("/add-participant")
-    public ResponseEntity<Map<String, Object>> addParticipant(@RequestBody Map<String, String> request) {
-        Map<String, Object> response = new HashMap<>();
-        
-        try {
-            String conferenceSid = request.get("conferenceSid");
-            String phoneNumber = request.get("phoneNumber");
-
-            if (conferenceSid == null || phoneNumber == null) {
-                response.put("success", false);
-                response.put("error", "Both conferenceSid and phoneNumber are required");
-                return ResponseEntity.badRequest().body(response);
-            }
-
-            // Validate conference name format
-            if (!secureConferenceService.isValidConferenceName(conferenceSid)) {
-                response.put("success", false);
-                response.put("error", "Invalid conference identifier");
-                return ResponseEntity.badRequest().body(response);
-            }
-
-            // FIXED: Use correct method name
-            String participantCallSid = botParticipantService.addParticipantToConference(
-                conferenceSid, phoneNumber);
-
-            response.put("success", true);
-            response.put("participantCallSid", participantCallSid);
-            response.put("conferenceSid", conferenceSid);
-
-        } catch (Exception e) {
-            logger.error("Failed to add participant: {}", e.getMessage(), e);
-            response.put("success", false);
-            response.put("error", "Failed to add participant: " + e.getMessage());
-            return ResponseEntity.internalServerError().body(response);
-        }
-
-        return ResponseEntity.ok(response);
-    }
-
-    /**
-     * Get conference status and participants
-     */
-    @GetMapping("/conference/{conferenceSid}/status")
-    public ResponseEntity<Map<String, Object>> getConferenceStatus(@PathVariable String conferenceSid) {
-        Map<String, Object> response = new HashMap<>();
-        
-        try {
-            // Validate conference name format
-            if (!secureConferenceService.isValidConferenceName(conferenceSid)) {
-                response.put("success", false);
-                response.put("error", "Invalid conference identifier");
-                return ResponseEntity.badRequest().body(response);
-            }
-
-            var participants = botParticipantService.getConferenceParticipants(conferenceSid);
-            // FIXED: Use correct method name
-            var conferenceInfo = botParticipantService.getConferenceInfo(conferenceSid);
-            var metadata = secureConferenceService.getConferenceMetadata(conferenceSid);
-
-            response.put("success", true);
-            response.put("conferenceSid", conferenceSid);
-            response.put("participantCount", participants.size());
-            
-            if (conferenceInfo != null) {
-                response.put("status", conferenceInfo.getStatus());
-            } else {
-                response.put("status", "not_found");
-            }
-            
-            if (metadata != null) {
-                response.put("sourceLanguage", metadata.getSourceLanguage());
-                response.put("targetLanguage", metadata.getTargetLanguage());
-                response.put("createdAt", metadata.getCreatedAt());
-            }
-
-        } catch (Exception e) {
-            logger.error("Failed to get conference status: {}", e.getMessage(), e);
-            response.put("success", false);
-            response.put("error", "Failed to get conference status: " + e.getMessage());
-            return ResponseEntity.internalServerError().body(response);
-        }
-
-        return ResponseEntity.ok(response);
-    }
-
-    /**
-     * End a conference
-     */
-    @PostMapping("/conference/{conferenceSid}/end")
-    public ResponseEntity<Map<String, Object>> endConference(@PathVariable String conferenceSid) {
-        Map<String, Object> response = new HashMap<>();
-        
-        try {
-            // Validate conference name format
-            if (!secureConferenceService.isValidConferenceName(conferenceSid)) {
-                response.put("success", false);
-                response.
+}

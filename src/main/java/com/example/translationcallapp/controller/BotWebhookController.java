@@ -80,7 +80,7 @@ public class BotWebhookController {
             VoiceResponse.Builder responseBuilder = new VoiceResponse.Builder();
 
             if (conferenceName != null) {
-                // Build conference with Twilio 10.x TwiML API - FIXED: Use Dial.Builder
+                // Build conference with Twilio 10.x TwiML API
                 Conference.Builder conferenceBuilder = new Conference.Builder(conferenceName)
                         .muted(false)
                         .startConferenceOnEnter(false)
@@ -89,7 +89,7 @@ public class BotWebhookController {
 
                 Conference conference = conferenceBuilder.build();
                 
-                // FIXED: In Twilio 10.x, Conference goes inside a Dial
+                // In Twilio 10.x, Conference goes inside a Dial
                 Dial.Builder dialBuilder = new Dial.Builder()
                         .conference(conference);
                 
@@ -112,7 +112,7 @@ public class BotWebhookController {
                     responseBuilder.start(start);
                 }
             } else {
-                // Default response when no conference specified - FIXED: Create Say object
+                // Default response when no conference specified
                 Say defaultSay = new Say.Builder("Bot participant ready").build();
                 responseBuilder.say(defaultSay);
             }
@@ -352,7 +352,7 @@ public class BotWebhookController {
     }
 
     /**
-     * Builds error response TwiML - FIXED: Create Say object properly
+     * Builds error response TwiML
      */
     private String buildErrorResponse(String message) {
         Say errorSay = new Say.Builder("Error: " + message).build();
@@ -376,3 +376,4 @@ public class BotWebhookController {
             logger.error("Error during bot participant cleanup for conference {}: {}", conferenceSid, e.getMessage());
         }
     }
+}
