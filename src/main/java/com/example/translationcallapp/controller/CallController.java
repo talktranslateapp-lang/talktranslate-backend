@@ -12,7 +12,7 @@ import java.util.HashMap;
 import java.util.Map;
 
 @RestController
-@RequestMapping("/api/calls")
+@RequestMapping("/api/call")
 public class CallController {
 
     private static final Logger logger = LoggerFactory.getLogger(CallController.class);
@@ -33,6 +33,60 @@ public class CallController {
         health.put("status", "UP");
         health.put("timestamp", System.currentTimeMillis());
         return ResponseEntity.ok(health);
+    }
+
+    /**
+     * Get Twilio access token for client
+     */
+    @GetMapping("/token")
+    public ResponseEntity<Map<String, Object>> getToken(@RequestParam String identity) {
+        Map<String, Object> response = new HashMap<>();
+        
+        try {
+            String token = botParticipantService.generateAccessToken(identity);
+            
+            response.put("success", true);
+            response.put("token", token);
+            response.put("identity", identity);
+            
+        } catch (Exception e) {
+            logger.error("Failed to generate token: {}", e.getMessage(), e);
+            response.put("success", false);
+            response.put("error", "Failed to generate access token: " + e.getMessage());
+            return ResponseEntity.internalServerError().body(response);
+        }
+        
+        return ResponseEntity.ok(response);
+    }
+
+    /**
+     * Store call data before initiating call
+     */
+    @PostMapping("/store-call-data")
+    public ResponseEntity<Map<String, Object>> storeCallData(@RequestBody Map<String, Object> callData) {
+        Map<String, Object> response = new HashMap<>();
+        
+        try {
+            String callId = (String) callData.get("callId");
+            String targetPhoneNumber = (String) callData.get("targetPhoneNumber");
+            String sourceLanguage = (String) callData.get("sourceLanguage");
+            String targetLanguage = (String) callData.get("targetLanguage");
+            
+            // Store the call data for webhook processing
+            botParticipantService.storeCallData(callId, targetPhoneNumber, sourceLanguage, targetLanguage);
+            
+            response.put("success", true);
+            response.put("message", "Call data stored successfully");
+            response.put("callId", callId);
+            
+        } catch (Exception e) {
+            logger.error("Failed to store call data: {}", e.getMessage(), e);
+            response.put("success", false);
+            response.put("error", "Failed to store call data: " + e.getMessage());
+            return ResponseEntity.internalServerError().body(response);
+        }
+        
+        return ResponseEntity.ok(response);
     }
 
     /**
