@@ -151,7 +151,9 @@ public class BotParticipantService {
                 throw new RuntimeException("Rate limit exceeded. Please try again later.");
             }
 
-            String webhookUrl = webhookBaseUrl + "/api/call/voice/incoming";
+            // CRITICAL FIX: Use /conference-join endpoint to prevent infinite loop
+            String webhookUrl = webhookBaseUrl + "/api/call/conference-join?conferenceName=" + 
+                               java.net.URLEncoder.encode(conferenceSid, "UTF-8");
             
             Call call = Call.creator(
                 new PhoneNumber(twilioPhoneNumber), // To (bot's virtual number)
@@ -207,8 +209,8 @@ public class BotParticipantService {
                 throw new RuntimeException("Rate limit exceeded. Please try again later.");
             }
 
-            // Pass conference name as URL parameter for reliable lookup
-            String webhookUrl = webhookBaseUrl + "/api/call/voice/incoming?conferenceName=" + 
+            // CRITICAL FIX: Use /conference-join endpoint to prevent infinite loop
+            String webhookUrl = webhookBaseUrl + "/api/call/conference-join?conferenceName=" + 
                                java.net.URLEncoder.encode(conferenceSid, "UTF-8");
             
             Call call = Call.creator(

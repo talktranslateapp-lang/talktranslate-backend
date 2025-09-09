@@ -97,7 +97,46 @@ public class CallController {
     }
 
     /**
+     * Simple conference join endpoint - NO bot/participant logic to prevent loops
+     */
+    @PostMapping(value = "/conference-join", produces = MediaType.APPLICATION_XML_VALUE)
+    public ResponseEntity<String> conferenceJoin(@RequestParam String conferenceName) {
+        try {
+            logger.info("Conference join request for: {}", conferenceName);
+            
+            // Simple TwiML - just join the conference, no additional logic
+            VoiceResponse response = new VoiceResponse.Builder()
+                .dial(new Dial.Builder()
+                    .conference(new Conference.Builder(conferenceName)
+                        .startConferenceOnEnter(true)
+                        .endConferenceOnExit(false)
+                        .build())
+                    .build())
+                .build();
+            
+            return ResponseEntity.ok()
+                .contentType(MediaType.APPLICATION_XML)
+                .body(response.toXml());
+                
+        } catch (Exception e) {
+            logger.error("Error in conference join: {}", e.getMessage(), e);
+            
+            VoiceResponse errorResponse = new VoiceResponse.Builder()
+                .say(new Say.Builder("Unable to join conference.")
+                    .voice(Say.Voice.ALICE)
+                    .build())
+                .hangup(new Hangup.Builder().build())
+                .build();
+                
+            return ResponseEntity.ok()
+                .contentType(MediaType.APPLICATION_XML)
+                .body(errorResponse.toXml());
+        }
+    }
+
+    /**
      * Handle incoming voice calls and generate TwiML
+     * ONLY for initial calls - participants use /conference-join to prevent loops
      */
     @PostMapping(value = "/voice/incoming", produces = MediaType.APPLICATION_XML_VALUE)
     public ResponseEntity<String> handleIncomingCall(
