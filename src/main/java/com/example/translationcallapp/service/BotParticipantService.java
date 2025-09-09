@@ -85,10 +85,20 @@ public class BotParticipantService {
     }
 
     /**
-     * Check if a bot is already in the conference
+     * Check if a bot is already in the conference - WITH DEBUG LOGGING
      */
     public boolean isBotInConference(String conferenceName) {
-        return conferencesWithBots.contains(conferenceName);
+        boolean result = conferencesWithBots.contains(conferenceName);
+        logger.info("Bot check for conference '{}': {} (current set: {})", conferenceName, result, conferencesWithBots);
+        return result;
+    }
+
+    /**
+     * Clear bot tracking - useful for testing and cleanup
+     */
+    public void clearBotTracking() {
+        conferencesWithBots.clear();
+        logger.info("Cleared all bot tracking - conferences with bots: {}", conferencesWithBots);
     }
 
     /**
@@ -151,6 +161,8 @@ public class BotParticipantService {
                 throw new RuntimeException("Rate limit exceeded. Please try again later.");
             }
 
+            logger.info("Adding translation bot to conference: {}", conferenceSid);
+
             // CRITICAL FIX: Use /conference-join endpoint to prevent infinite loop
             String webhookUrl = webhookBaseUrl + "/api/call/conference-join?conferenceName=" + 
                                java.net.URLEncoder.encode(conferenceSid, "UTF-8");
@@ -188,6 +200,7 @@ public class BotParticipantService {
             
             // Track that this conference now has a bot
             conferencesWithBots.add(conferenceSid);
+            logger.info("Conference '{}' marked as having bot. Updated bot set: {}", conferenceSid, conferencesWithBots);
 
             return call.getSid();
 
@@ -208,6 +221,8 @@ public class BotParticipantService {
             if (!checkRateLimit()) {
                 throw new RuntimeException("Rate limit exceeded. Please try again later.");
             }
+
+            logger.info("Adding participant {} to conference: {}", phoneNumber, conferenceSid);
 
             // CRITICAL FIX: Use /conference-join endpoint to prevent infinite loop
             String webhookUrl = webhookBaseUrl + "/api/call/conference-join?conferenceName=" + 
@@ -289,10 +304,12 @@ public class BotParticipantService {
     }
 
     /**
-     * End conference
+     * End conference - IMPROVED CLEANUP
      */
     public void endConference(String conferenceSid) {
         try {
+            logger.info("Ending conference: {}", conferenceSid);
+            
             // Get and disconnect all participants
             List<Participant> participants = getConferenceParticipants(conferenceSid);
             for (Participant participant : participants) {
@@ -327,10 +344,10 @@ public class BotParticipantService {
                 }
             }
             
-            // Remove from bot tracking
-            conferencesWithBots.remove(conferenceSid);
-            
-            logger.info("Conference {} ended and cleaned up", conferenceSid);
+            // CRITICAL: Remove from bot tracking
+            boolean removed = conferencesWithBots.remove(conferenceSid);
+            logger.info("Conference {} ended. Removed from bot tracking: {}. Updated bot set: {}", 
+                       conferenceSid, removed, conferencesWithBots);
             
         } catch (Exception e) {
             logger.error("Error ending conference {}: {}", conferenceSid, e.getMessage());
@@ -352,10 +369,12 @@ public class BotParticipantService {
     }
 
     /**
-     * Remove all bot participants from conference
+     * Remove all bot participants from conference - IMPROVED CLEANUP
      */
     public void removeAllBotParticipants(String conferenceSid) {
         try {
+            logger.info("Removing all bot participants from conference: {}", conferenceSid);
+            
             Set<String> callSids = activeConferences.get(conferenceSid);
             if (callSids != null) {
                 for (String callSid : new HashSet<>(callSids)) {
@@ -380,8 +399,10 @@ public class BotParticipantService {
                 }
             }
             
-            // Remove from bot tracking if no bots left
-            conferencesWithBots.remove(conferenceSid);
+            // CRITICAL: Remove from bot tracking if no bots left
+            boolean removed = conferencesWithBots.remove(conferenceSid);
+            logger.info("Removed conference {} from bot tracking: {}. Updated bot set: {}", 
+                       conferenceSid, removed, conferencesWithBots);
         } catch (Exception e) {
             logger.error("Error removing bot participants from conference {}: {}", conferenceSid, e.getMessage());
         }
@@ -424,16 +445,21 @@ public class BotParticipantService {
     }
 
     /**
-     * Cleanup stale data
+     * IMPROVED cleanup stale data with better bot tracking cleanup
      */
     private void cleanupStaleData() {
         long cutoffTime = System.currentTimeMillis() - TimeUnit.HOURS.toMillis(24);
+        
+        // Track which conferences should be removed from bot tracking
+        Set<String> conferencesToRemove = new HashSet<>();
         
         participantMetadata.entrySet().removeIf(entry -> {
             if (entry.getValue().getTimestamp() < cutoffTime) {
                 logger.debug("Removing stale participant metadata: {}", entry.getKey());
                 if (entry.getValue().isBot()) {
                     activeBotCount.decrementAndGet();
+                    // Mark conference for removal from bot tracking
+                    conferencesToRemove.add(entry.getValue().getConferenceName());
                 }
                 return true;
             }
@@ -444,14 +470,22 @@ public class BotParticipantService {
         activeConferences.entrySet().removeIf(entry -> {
             if (entry.getValue().isEmpty()) {
                 logger.debug("Removing empty conference: {}", entry.getKey());
-                conferencesWithBots.remove(entry.getKey());
+                conferencesToRemove.add(entry.getKey());
                 return true;
             }
             return false;
         });
         
-        logger.debug("Cleanup completed. Active bots: {}, Active conferences: {}", 
-                    activeBotCount.get(), activeConferences.size());
+        // Remove stale conferences from bot tracking
+        for (String conferenceToRemove : conferencesToRemove) {
+            boolean removed = conferencesWithBots.remove(conferenceToRemove);
+            if (removed) {
+                logger.debug("Removed stale conference from bot tracking: {}", conferenceToRemove);
+            }
+        }
+        
+        logger.debug("Cleanup completed. Active bots: {}, Active conferences: {}, Bot tracking set: {}", 
+                    activeBotCount.get(), activeConferences.size(), conferencesWithBots);
     }
 
     /**
