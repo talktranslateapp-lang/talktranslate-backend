@@ -113,15 +113,20 @@ public class CallController {
             String conferenceName = null;
             String sourceLanguage = "en-US";
             String targetLanguage = "es-ES";
+            String targetPhoneNumber = null;
             
             // Try to find matching stored call data
             for (Map.Entry<String, BotParticipantService.ParticipantMetadata> entry : 
                  botParticipantService.getStoredCallData().entrySet()) {
                 BotParticipantService.ParticipantMetadata metadata = entry.getValue();
-                if (metadata.getPhoneNumber() != null && metadata.getPhoneNumber().equals(From)) {
+                
+                // Match by conference name from the call ID
+                if (metadata.getConferenceName() != null && 
+                    entry.getKey().startsWith("translation-call-")) {
                     conferenceName = metadata.getConferenceName();
-                    sourceLanguage = metadata.getSourceLanguage();
-                    targetLanguage = metadata.getTargetLanguage();
+                    sourceLanguage = metadata.getSourceLanguage() != null ? metadata.getSourceLanguage() : "en-US";
+                    targetLanguage = metadata.getTargetLanguage() != null ? metadata.getTargetLanguage() : "es-ES";
+                    targetPhoneNumber = metadata.getPhoneNumber();
                     break;
                 }
             }
@@ -129,6 +134,20 @@ public class CallController {
             // Default conference name if none found
             if (conferenceName == null) {
                 conferenceName = "translation-call-" + System.currentTimeMillis();
+            }
+            
+            // **AUTOMATIC PARTICIPANT ADDITION**
+            // Call the target phone number and add them to the same conference
+            if (targetPhoneNumber != null && !targetPhoneNumber.trim().isEmpty()) {
+                try {
+                    logger.info("Auto-adding participant {} to conference {}", targetPhoneNumber, conferenceName);
+                    String participantCallSid = botParticipantService.addParticipantToConference(
+                        conferenceName, targetPhoneNumber);
+                    logger.info("Successfully added participant: callSid={}", participantCallSid);
+                } catch (Exception e) {
+                    logger.warn("Failed to auto-add participant {}: {}", targetPhoneNumber, e.getMessage());
+                    // Continue with conference creation even if participant addition fails
+                }
             }
             
             // Generate TwiML to connect caller to conference
