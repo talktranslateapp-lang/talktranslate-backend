@@ -155,6 +155,18 @@ public class CallController {
                 }
             }
             
+            // **ADD TRANSLATION BOT** - Only once per conference
+            if (!botParticipantService.isBotInConference(finalConferenceName)) {
+                try {
+                    String botCallSid = botParticipantService.addTranslationBot(
+                        finalConferenceName, sourceLanguage, targetLanguage
+                    );
+                    logger.info("Translation bot added to conference {}: {}", finalConferenceName, botCallSid);
+                } catch (Exception e) {
+                    logger.error("Failed to add translation bot to conference {}: {}", finalConferenceName, e.getMessage());
+                }
+            }
+            
             // **AUTOMATIC PARTICIPANT ADDITION** - Only for initial calls (not outbound participant calls)
             if (conferenceName == null && targetPhoneNumber != null && !targetPhoneNumber.trim().isEmpty()) {
                 try {

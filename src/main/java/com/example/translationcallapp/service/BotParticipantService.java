@@ -64,6 +64,7 @@ public class BotParticipantService {
     // Conference and participant tracking
     private final Map<String, Set<String>> activeConferences = new ConcurrentHashMap<>();
     private final Map<String, ParticipantMetadata> participantMetadata = new ConcurrentHashMap<>();
+    private final Set<String> conferencesWithBots = ConcurrentHashMap.newKeySet();
     private final ScheduledExecutorService cleanupExecutor = Executors.newScheduledThreadPool(2);
 
     // Statistics tracking
@@ -81,6 +82,13 @@ public class BotParticipantService {
     private void initializeTwilio() {
         Twilio.init(twilioAccountSid, twilioAuthToken);
         logger.info("Twilio SDK initialized");
+    }
+
+    /**
+     * Check if a bot is already in the conference
+     */
+    public boolean isBotInConference(String conferenceName) {
+        return conferencesWithBots.contains(conferenceName);
     }
 
     /**
@@ -175,6 +183,9 @@ public class BotParticipantService {
             
             logger.info("Translation bot added: callSid={}, conference={}, languages={}->{}",
                        call.getSid(), conferenceSid, fromLanguage, toLanguage);
+            
+            // Track that this conference now has a bot
+            conferencesWithBots.add(conferenceSid);
 
             return call.getSid();
 
@@ -314,6 +325,9 @@ public class BotParticipantService {
                 }
             }
             
+            // Remove from bot tracking
+            conferencesWithBots.remove(conferenceSid);
+            
             logger.info("Conference {} ended and cleaned up", conferenceSid);
             
         } catch (Exception e) {
@@ -363,6 +377,9 @@ public class BotParticipantService {
                     }
                 }
             }
+            
+            // Remove from bot tracking if no bots left
+            conferencesWithBots.remove(conferenceSid);
         } catch (Exception e) {
             logger.error("Error removing bot participants from conference {}: {}", conferenceSid, e.getMessage());
         }
@@ -425,6 +442,7 @@ public class BotParticipantService {
         activeConferences.entrySet().removeIf(entry -> {
             if (entry.getValue().isEmpty()) {
                 logger.debug("Removing empty conference: {}", entry.getKey());
+                conferencesWithBots.remove(entry.getKey());
                 return true;
             }
             return false;
