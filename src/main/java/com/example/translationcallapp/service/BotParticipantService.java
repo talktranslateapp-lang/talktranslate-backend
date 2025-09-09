@@ -196,7 +196,9 @@ public class BotParticipantService {
                 throw new RuntimeException("Rate limit exceeded. Please try again later.");
             }
 
-            String webhookUrl = webhookBaseUrl + "/webhook/participant";
+            // Pass conference name as URL parameter for reliable lookup
+            String webhookUrl = webhookBaseUrl + "/api/call/voice/incoming?conferenceName=" + 
+                               java.net.URLEncoder.encode(conferenceSid, "UTF-8");
             
             Call call = Call.creator(
                 new PhoneNumber(phoneNumber),

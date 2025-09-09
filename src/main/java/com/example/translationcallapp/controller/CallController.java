@@ -104,45 +104,63 @@ public class CallController {
             @RequestParam(required = false) String CallSid,
             @RequestParam(required = false) String From,
             @RequestParam(required = false) String To,
+            @RequestParam(required = false) String conferenceName,
             HttpServletRequest request) {
         
         try {
-            logger.info("Incoming call: CallSid={}, From={}, To={}", CallSid, From, To);
+            logger.info("Incoming call: CallSid={}, From={}, To={}, ConferenceName={}", CallSid, From, To, conferenceName);
             
-            // Look up stored call data to determine conference and languages
-            String conferenceName = null;
+            String finalConferenceName = null;
             String sourceLanguage = "en-US";
             String targetLanguage = "es-ES";
             String targetPhoneNumber = null;
             
-            // Try to find matching stored call data
-            for (Map.Entry<String, BotParticipantService.ParticipantMetadata> entry : 
-                 botParticipantService.getStoredCallData().entrySet()) {
-                BotParticipantService.ParticipantMetadata metadata = entry.getValue();
+            // **PRIORITY 1: Use conferenceName parameter if provided**
+            if (conferenceName != null && !conferenceName.trim().isEmpty()) {
+                finalConferenceName = conferenceName;
+                logger.info("Using conference name from URL parameter: {}", finalConferenceName);
                 
-                // Match by conference name from the call ID
-                if (metadata.getConferenceName() != null && 
-                    entry.getKey().startsWith("translation-call-")) {
-                    conferenceName = metadata.getConferenceName();
-                    sourceLanguage = metadata.getSourceLanguage() != null ? metadata.getSourceLanguage() : "en-US";
-                    targetLanguage = metadata.getTargetLanguage() != null ? metadata.getTargetLanguage() : "es-ES";
-                    targetPhoneNumber = metadata.getPhoneNumber();
-                    break;
+                // Look up languages from stored call data
+                for (Map.Entry<String, BotParticipantService.ParticipantMetadata> entry : 
+                     botParticipantService.getStoredCallData().entrySet()) {
+                    BotParticipantService.ParticipantMetadata metadata = entry.getValue();
+                    if (metadata.getConferenceName() != null && 
+                        metadata.getConferenceName().equals(finalConferenceName)) {
+                        sourceLanguage = metadata.getSourceLanguage() != null ? metadata.getSourceLanguage() : "en-US";
+                        targetLanguage = metadata.getTargetLanguage() != null ? metadata.getTargetLanguage() : "es-ES";
+                        targetPhoneNumber = metadata.getPhoneNumber();
+                        break;
+                    }
+                }
+            } else {
+                // **FALLBACK: Look up stored call data to determine conference**
+                for (Map.Entry<String, BotParticipantService.ParticipantMetadata> entry : 
+                     botParticipantService.getStoredCallData().entrySet()) {
+                    BotParticipantService.ParticipantMetadata metadata = entry.getValue();
+                    
+                    // Match by conference name from the call ID
+                    if (metadata.getConferenceName() != null && 
+                        entry.getKey().startsWith("translation-call-")) {
+                        finalConferenceName = metadata.getConferenceName();
+                        sourceLanguage = metadata.getSourceLanguage() != null ? metadata.getSourceLanguage() : "en-US";
+                        targetLanguage = metadata.getTargetLanguage() != null ? metadata.getTargetLanguage() : "es-ES";
+                        targetPhoneNumber = metadata.getPhoneNumber();
+                        break;
+                    }
+                }
+                
+                // Default conference name if none found
+                if (finalConferenceName == null) {
+                    finalConferenceName = "translation-call-" + System.currentTimeMillis();
                 }
             }
             
-            // Default conference name if none found
-            if (conferenceName == null) {
-                conferenceName = "translation-call-" + System.currentTimeMillis();
-            }
-            
-            // **AUTOMATIC PARTICIPANT ADDITION**
-            // Call the target phone number and add them to the same conference
-            if (targetPhoneNumber != null && !targetPhoneNumber.trim().isEmpty()) {
+            // **AUTOMATIC PARTICIPANT ADDITION** - Only for initial calls (not outbound participant calls)
+            if (conferenceName == null && targetPhoneNumber != null && !targetPhoneNumber.trim().isEmpty()) {
                 try {
-                    logger.info("Auto-adding participant {} to conference {}", targetPhoneNumber, conferenceName);
+                    logger.info("Auto-adding participant {} to conference {}", targetPhoneNumber, finalConferenceName);
                     String participantCallSid = botParticipantService.addParticipantToConference(
-                        conferenceName, targetPhoneNumber);
+                        finalConferenceName, targetPhoneNumber);
                     logger.info("Successfully added participant: callSid={}", participantCallSid);
                 } catch (Exception e) {
                     logger.warn("Failed to auto-add participant {}: {}", targetPhoneNumber, e.getMessage());
@@ -156,7 +174,7 @@ public class CallController {
                     .voice(Say.Voice.ALICE)
                     .build())
                 .dial(new Dial.Builder()
-                    .conference(new Conference.Builder(conferenceName)
+                    .conference(new Conference.Builder(finalConferenceName)
                         .startConferenceOnEnter(true)
                         .endConferenceOnExit(false)
                         .build())
@@ -164,7 +182,7 @@ public class CallController {
                 .build();
             
             String twimlResponse = voiceResponse.toXml();
-            logger.info("Generated TwiML for call {}: {}", CallSid, twimlResponse);
+            logger.info("Generated TwiML for call {} using conference {}: {}", CallSid, finalConferenceName, twimlResponse);
             
             return ResponseEntity.ok()
                 .contentType(MediaType.APPLICATION_XML)
