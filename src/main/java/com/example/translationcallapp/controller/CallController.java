@@ -108,6 +108,8 @@ public class CallController {
             HttpServletRequest request) {
         
         try {
+            // Debug logging - add this temporarily
+            logger.info("All request parameters: {}", request.getParameterMap());
             logger.info("Incoming call: CallSid={}, From={}, To={}, ConferenceName={}", CallSid, From, To, conferenceName);
             
             String finalConferenceName = null;
@@ -129,6 +131,7 @@ public class CallController {
                         sourceLanguage = metadata.getSourceLanguage() != null ? metadata.getSourceLanguage() : "en-US";
                         targetLanguage = metadata.getTargetLanguage() != null ? metadata.getTargetLanguage() : "es-ES";
                         targetPhoneNumber = metadata.getPhoneNumber();
+                        logger.info("Found stored data: target={}, languages={}→{}", targetPhoneNumber, sourceLanguage, targetLanguage);
                         break;
                     }
                 }
@@ -155,6 +158,9 @@ public class CallController {
                 }
             }
             
+            logger.info("Final conference setup: name={}, target={}, languages={}→{}", 
+                       finalConferenceName, targetPhoneNumber, sourceLanguage, targetLanguage);
+            
             // **ADD TRANSLATION BOT** - Only once per conference
             if (!botParticipantService.isBotInConference(finalConferenceName)) {
                 try {
@@ -165,10 +171,12 @@ public class CallController {
                 } catch (Exception e) {
                     logger.error("Failed to add translation bot to conference {}: {}", finalConferenceName, e.getMessage());
                 }
+            } else {
+                logger.info("Bot already exists in conference: {}", finalConferenceName);
             }
             
-            // **AUTOMATIC PARTICIPANT ADDITION** - Only for initial calls (not outbound participant calls)
-            if (conferenceName == null && targetPhoneNumber != null && !targetPhoneNumber.trim().isEmpty()) {
+            // **AUTOMATIC PARTICIPANT ADDITION** - Only for initial frontend calls that have conferenceName parameter
+            if (conferenceName != null && targetPhoneNumber != null && !targetPhoneNumber.trim().isEmpty()) {
                 try {
                     logger.info("Auto-adding participant {} to conference {}", targetPhoneNumber, finalConferenceName);
                     String participantCallSid = botParticipantService.addParticipantToConference(
@@ -178,6 +186,9 @@ public class CallController {
                     logger.warn("Failed to auto-add participant {}: {}", targetPhoneNumber, e.getMessage());
                     // Continue with conference creation even if participant addition fails
                 }
+            } else {
+                logger.info("Skipping participant addition - conferenceName: {}, targetPhoneNumber: {}", 
+                           conferenceName, targetPhoneNumber);
             }
             
             // Generate TwiML to connect caller to conference
