@@ -455,6 +455,13 @@ public class BotParticipantService {
                hourlyCallCount.get() < maxHourlyCallLimit * 0.9;
     }
 
+    /**
+     * Get stored call data for webhook lookup
+     */
+    public Map<String, ParticipantMetadata> getStoredCallData() {
+        return participantMetadata;
+    }
+
     // Inner classes for data structures
     public static class ParticipantMetadata {
         private String callSid;

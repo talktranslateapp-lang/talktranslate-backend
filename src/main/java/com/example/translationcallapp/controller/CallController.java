@@ -2,12 +2,19 @@ package com.example.translationcallapp.controller;
 
 import com.example.translationcallapp.service.BotParticipantService;
 import com.example.translationcallapp.service.SecureConferenceService;
+import com.twilio.twiml.VoiceResponse;
+import com.twilio.twiml.voice.Say;
+import com.twilio.twiml.voice.Dial;
+import com.twilio.twiml.voice.Conference;
+import com.twilio.twiml.voice.Hangup;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.http.MediaType;
 import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.*;
 
+import jakarta.servlet.http.HttpServletRequest;
 import java.util.HashMap;
 import java.util.Map;
 
@@ -87,6 +94,78 @@ public class CallController {
         }
         
         return ResponseEntity.ok(response);
+    }
+
+    /**
+     * Handle incoming voice calls and generate TwiML
+     */
+    @PostMapping(value = "/voice/incoming", produces = MediaType.APPLICATION_XML_VALUE)
+    public ResponseEntity<String> handleIncomingCall(
+            @RequestParam(required = false) String CallSid,
+            @RequestParam(required = false) String From,
+            @RequestParam(required = false) String To,
+            HttpServletRequest request) {
+        
+        try {
+            logger.info("Incoming call: CallSid={}, From={}, To={}", CallSid, From, To);
+            
+            // Look up stored call data to determine conference and languages
+            String conferenceName = null;
+            String sourceLanguage = "en-US";
+            String targetLanguage = "es-ES";
+            
+            // Try to find matching stored call data
+            for (Map.Entry<String, BotParticipantService.ParticipantMetadata> entry : 
+                 botParticipantService.getStoredCallData().entrySet()) {
+                BotParticipantService.ParticipantMetadata metadata = entry.getValue();
+                if (metadata.getPhoneNumber() != null && metadata.getPhoneNumber().equals(From)) {
+                    conferenceName = metadata.getConferenceName();
+                    sourceLanguage = metadata.getSourceLanguage();
+                    targetLanguage = metadata.getTargetLanguage();
+                    break;
+                }
+            }
+            
+            // Default conference name if none found
+            if (conferenceName == null) {
+                conferenceName = "translation-call-" + System.currentTimeMillis();
+            }
+            
+            // Generate TwiML to connect caller to conference
+            VoiceResponse voiceResponse = new VoiceResponse.Builder()
+                .say(new Say.Builder("Welcome to Talk Translate. Connecting you to the translation conference.")
+                    .voice(Say.Voice.ALICE)
+                    .build())
+                .dial(new Dial.Builder()
+                    .conference(new Conference.Builder(conferenceName)
+                        .startConferenceOnEnter(true)
+                        .endConferenceOnExit(false)
+                        .build())
+                    .build())
+                .build();
+            
+            String twimlResponse = voiceResponse.toXml();
+            logger.info("Generated TwiML for call {}: {}", CallSid, twimlResponse);
+            
+            return ResponseEntity.ok()
+                .contentType(MediaType.APPLICATION_XML)
+                .body(twimlResponse);
+                
+        } catch (Exception e) {
+            logger.error("Error handling incoming call {}: {}", CallSid, e.getMessage(), e);
+            
+            // Return error TwiML
+            VoiceResponse errorResponse = new VoiceResponse.Builder()
+                .say(new Say.Builder("Sorry, there was an error connecting your call. Please try again later.")
+                    .voice(Say.Voice.ALICE)
+                    .build())
+                .hangup(new Hangup.Builder().build())
+                .build();
+                
+            return ResponseEntity.ok()
+                .contentType(MediaType.APPLICATION_XML)
+                .body(errorResponse.toXml());
+        }
     }
 
     /**
