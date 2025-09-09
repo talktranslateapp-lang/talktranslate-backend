@@ -15,7 +15,6 @@ import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.*;
 
 import jakarta.servlet.http.HttpServletRequest;
-import java.util.Collections;
 import java.util.HashMap;
 import java.util.Map;
 
@@ -109,22 +108,7 @@ public class CallController {
             HttpServletRequest request) {
         
         try {
-            // Debug logging - log all parameters
-            logger.info("All request parameters: {}", request.getParameterMap());
-            
-            // Try to get conferenceName from different parameter sources
-            String finalConferenceParam = conferenceName;
-            if (finalConferenceParam == null) {
-                finalConferenceParam = request.getParameter("conferenceName");
-            }
-            
-            // Log all parameter names to debug
-            logger.info("Parameter names: {}", Collections.list(request.getParameterNames()));
-            for (String paramName : Collections.list(request.getParameterNames())) {
-                logger.info("Parameter: {} = {}", paramName, request.getParameter(paramName));
-            }
-            
-            logger.info("Incoming call: CallSid={}, From={}, To={}, ConferenceName={}", CallSid, From, To, finalConferenceParam);
+            logger.info("Incoming call: CallSid={}, From={}, To={}, ConferenceName={}", CallSid, From, To, conferenceName);
             
             String finalConferenceName = null;
             String sourceLanguage = "en-US";
@@ -132,8 +116,8 @@ public class CallController {
             String targetPhoneNumber = null;
             
             // **PRIORITY 1: Use conferenceName parameter if provided**
-            if (finalConferenceParam != null && !finalConferenceParam.trim().isEmpty()) {
-                finalConferenceName = finalConferenceParam;
+            if (conferenceName != null && !conferenceName.trim().isEmpty()) {
+                finalConferenceName = conferenceName;
                 logger.info("Using conference name from URL parameter: {}", finalConferenceName);
                 
                 // Look up languages from stored call data
@@ -190,7 +174,7 @@ public class CallController {
             }
             
             // **AUTOMATIC PARTICIPANT ADDITION** - Only for initial frontend calls that have conferenceName parameter
-            if (finalConferenceParam != null && targetPhoneNumber != null && !targetPhoneNumber.trim().isEmpty()) {
+            if (conferenceName != null && targetPhoneNumber != null && !targetPhoneNumber.trim().isEmpty()) {
                 try {
                     logger.info("Auto-adding participant {} to conference {}", targetPhoneNumber, finalConferenceName);
                     String participantCallSid = botParticipantService.addParticipantToConference(
@@ -201,8 +185,8 @@ public class CallController {
                     // Continue with conference creation even if participant addition fails
                 }
             } else {
-                logger.info("Skipping participant addition - finalConferenceParam: {}, targetPhoneNumber: {}", 
-                           finalConferenceParam, targetPhoneNumber);
+                logger.info("Skipping participant addition - conferenceName: {}, targetPhoneNumber: {}", 
+                           conferenceName, targetPhoneNumber);
             }
             
             // Generate TwiML to connect caller to conference
