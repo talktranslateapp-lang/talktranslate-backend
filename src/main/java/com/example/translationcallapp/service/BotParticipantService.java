@@ -151,7 +151,7 @@ public class BotParticipantService {
                 throw new RuntimeException("Rate limit exceeded. Please try again later.");
             }
 
-            String webhookUrl = webhookBaseUrl + "/webhook/participant";
+            String webhookUrl = webhookBaseUrl + "/api/call/voice/incoming";
             
             Call call = Call.creator(
                 new PhoneNumber(twilioPhoneNumber), // To (bot's virtual number)
