@@ -141,10 +141,10 @@ public class BotParticipantService {
             metadata.setConferenceName(callId);
             metadata.setCallId(callId);
             metadata.setTimestamp(System.currentTimeMillis());
-            
+
             participantMetadata.put(callId, metadata);
-            
-            logger.info("Stored call data for callId: {}, target: {}, languages: {} -> {}", 
+
+            logger.info("Stored call data for callId: {}, target: {}, languages: {} -> {}",
                        callId, targetPhoneNumber, sourceLanguage, targetLanguage);
         } catch (Exception e) {
             logger.error("Failed to store call data for callId {}: {}", callId, e.getMessage());
@@ -153,7 +153,7 @@ public class BotParticipantService {
     }
 
     /**
-     * Add translation bot to conference
+     * Add translation bot to conference - MODIFIED TO USE MEDIA STREAMS
      */
     public String addTranslationBot(String conferenceSid, String fromLanguage, String toLanguage) {
         try {
@@ -163,10 +163,12 @@ public class BotParticipantService {
 
             logger.info("Adding translation bot to conference: {}", conferenceSid);
 
-            // CRITICAL FIX: Use /conference-join endpoint to prevent infinite loop
-            String webhookUrl = webhookBaseUrl + "/api/call/conference-join?conferenceName=" + 
-                               java.net.URLEncoder.encode(conferenceSid, "UTF-8");
-            
+            // CRITICAL CHANGE: Use /translation-bot endpoint for Media Streams
+            String webhookUrl = webhookBaseUrl + "/api/call/translation-bot?conferenceName=" + 
+                               java.net.URLEncoder.encode(conferenceSid, "UTF-8") + 
+                               "&fromLang=" + java.net.URLEncoder.encode(fromLanguage, "UTF-8") + 
+                               "&toLang=" + java.net.URLEncoder.encode(toLanguage, "UTF-8");
+
             Call call = Call.creator(
                 new PhoneNumber(twilioPhoneNumber), // To (bot's virtual number)
                 new PhoneNumber(twilioPhoneNumber), // From (same number for bot calls)
@@ -185,19 +187,19 @@ public class BotParticipantService {
             botMetadata.setTargetLanguage(toLanguage);
             botMetadata.setIsBot(true);
             botMetadata.setTimestamp(System.currentTimeMillis());
-            
+
             participantMetadata.put(call.getSid(), botMetadata);
-            
+
             // Track conference
             activeConferences.computeIfAbsent(conferenceSid, k -> ConcurrentHashMap.newKeySet()).add(call.getSid());
-            
+
             activeBotCount.incrementAndGet();
             totalBotsCreated.incrementAndGet();
             hourlyCallCount.incrementAndGet();
-            
+
             logger.info("Translation bot added: callSid={}, conference={}, languages={}->{}",
                        call.getSid(), conferenceSid, fromLanguage, toLanguage);
-            
+
             // Track that this conference now has a bot
             conferencesWithBots.add(conferenceSid);
             logger.info("Conference '{}' marked as having bot. Updated bot set: {}", conferenceSid, conferencesWithBots);
@@ -225,9 +227,9 @@ public class BotParticipantService {
             logger.info("Adding participant {} to conference: {}", phoneNumber, conferenceSid);
 
             // CRITICAL FIX: Use /conference-join endpoint to prevent infinite loop
-            String webhookUrl = webhookBaseUrl + "/api/call/conference-join?conferenceName=" + 
+            String webhookUrl = webhookBaseUrl + "/api/call/conference-join?conferenceName=" +
                                java.net.URLEncoder.encode(conferenceSid, "UTF-8");
-            
+
             Call call = Call.creator(
                 new PhoneNumber(phoneNumber),
                 new PhoneNumber(twilioPhoneNumber),
@@ -245,14 +247,14 @@ public class BotParticipantService {
             participantMeta.setConferenceName(conferenceSid);
             participantMeta.setIsBot(false);
             participantMeta.setTimestamp(System.currentTimeMillis());
-            
+
             participantMetadata.put(call.getSid(), participantMeta);
-            
+
             // Track conference
             activeConferences.computeIfAbsent(conferenceSid, k -> ConcurrentHashMap.newKeySet()).add(call.getSid());
-            
+
             hourlyCallCount.incrementAndGet();
-            
+
             logger.info("Participant added: callSid={}, phone={}, conference={}",
                        call.getSid(), phoneNumber, conferenceSid);
 
@@ -309,7 +311,7 @@ public class BotParticipantService {
     public void endConference(String conferenceSid) {
         try {
             logger.info("Ending conference: {}", conferenceSid);
-            
+
             // Get and disconnect all participants
             List<Participant> participants = getConferenceParticipants(conferenceSid);
             for (Participant participant : participants) {
@@ -317,22 +319,22 @@ public class BotParticipantService {
                     Participant.updater(conferenceSid, participant.getCallSid())
                         .setMuted(true)
                         .update();
-                    
+
                     // Disconnect the call
                     Call.updater(participant.getCallSid())
                         .setStatus(Call.UpdateStatus.COMPLETED)
                         .update();
-                        
+
                 } catch (Exception e) {
                     logger.warn("Failed to disconnect participant {}: {}", participant.getCallSid(), e.getMessage());
                 }
             }
-            
+
             // Update the conference status
             Conference.updater(conferenceSid)
                 .setStatus(Conference.UpdateStatus.COMPLETED)
                 .update();
-            
+
             // Clean up local tracking
             Set<String> callSids = activeConferences.remove(conferenceSid);
             if (callSids != null) {
@@ -343,12 +345,12 @@ public class BotParticipantService {
                     }
                 }
             }
-            
+
             // CRITICAL: Remove from bot tracking
             boolean removed = conferencesWithBots.remove(conferenceSid);
-            logger.info("Conference {} ended. Removed from bot tracking: {}. Updated bot set: {}", 
+            logger.info("Conference {} ended. Removed from bot tracking: {}. Updated bot set: {}",
                        conferenceSid, removed, conferencesWithBots);
-            
+
         } catch (Exception e) {
             logger.error("Error ending conference {}: {}", conferenceSid, e.getMessage());
             throw new RuntimeException("Failed to end conference: " + e.getMessage());
@@ -374,7 +376,7 @@ public class BotParticipantService {
     public void removeAllBotParticipants(String conferenceSid) {
         try {
             logger.info("Removing all bot participants from conference: {}", conferenceSid);
-            
+
             Set<String> callSids = activeConferences.get(conferenceSid);
             if (callSids != null) {
                 for (String callSid : new HashSet<>(callSids)) {
@@ -385,12 +387,12 @@ public class BotParticipantService {
                             Call.updater(callSid)
                                 .setStatus(Call.UpdateStatus.COMPLETED)
                                 .update();
-                                
+
                             // Clean up tracking
                             participantMetadata.remove(callSid);
                             callSids.remove(callSid);
                             activeBotCount.decrementAndGet();
-                            
+
                             logger.info("Removed bot participant: {}", callSid);
                         } catch (Exception e) {
                             logger.warn("Failed to remove bot participant {}: {}", callSid, e.getMessage());
@@ -398,10 +400,10 @@ public class BotParticipantService {
                     }
                 }
             }
-            
+
             // CRITICAL: Remove from bot tracking if no bots left
             boolean removed = conferencesWithBots.remove(conferenceSid);
-            logger.info("Removed conference {} from bot tracking: {}. Updated bot set: {}", 
+            logger.info("Removed conference {} from bot tracking: {}. Updated bot set: {}",
                        conferenceSid, removed, conferencesWithBots);
         } catch (Exception e) {
             logger.error("Error removing bot participants from conference {}: {}", conferenceSid, e.getMessage());
@@ -420,18 +422,18 @@ public class BotParticipantService {
                 logger.info("Rate limit counters reset");
             }
         }
-        
+
         // Check limits
         if (activeBotCount.get() >= maxConcurrentBots.get()) {
             logger.warn("Max concurrent bots limit reached: {}", maxConcurrentBots.get());
             return false;
         }
-        
+
         if (hourlyCallCount.get() >= maxHourlyCallLimit) {
             logger.warn("Hourly call limit reached: {}", maxHourlyCallLimit);
             return false;
         }
-        
+
         return true;
     }
 
@@ -449,10 +451,10 @@ public class BotParticipantService {
      */
     private void cleanupStaleData() {
         long cutoffTime = System.currentTimeMillis() - TimeUnit.HOURS.toMillis(24);
-        
+
         // Track which conferences should be removed from bot tracking
         Set<String> conferencesToRemove = new HashSet<>();
-        
+
         participantMetadata.entrySet().removeIf(entry -> {
             if (entry.getValue().getTimestamp() < cutoffTime) {
                 logger.debug("Removing stale participant metadata: {}", entry.getKey());
@@ -465,7 +467,7 @@ public class BotParticipantService {
             }
             return false;
         });
-        
+
         // Clean up empty conference sets
         activeConferences.entrySet().removeIf(entry -> {
             if (entry.getValue().isEmpty()) {
@@ -475,7 +477,7 @@ public class BotParticipantService {
             }
             return false;
         });
-        
+
         // Remove stale conferences from bot tracking
         for (String conferenceToRemove : conferencesToRemove) {
             boolean removed = conferencesWithBots.remove(conferenceToRemove);
@@ -483,8 +485,8 @@ public class BotParticipantService {
                 logger.debug("Removed stale conference from bot tracking: {}", conferenceToRemove);
             }
         }
-        
-        logger.debug("Cleanup completed. Active bots: {}, Active conferences: {}, Bot tracking set: {}", 
+
+        logger.debug("Cleanup completed. Active bots: {}, Active conferences: {}, Bot tracking set: {}",
                     activeBotCount.get(), activeConferences.size(), conferencesWithBots);
     }
 
@@ -507,7 +509,7 @@ public class BotParticipantService {
      * Check if service is healthy
      */
     public boolean isHealthy() {
-        return activeBotCount.get() < maxConcurrentBots.get() * 0.9 && 
+        return activeBotCount.get() < maxConcurrentBots.get() * 0.9 &&
                hourlyCallCount.get() < maxHourlyCallLimit * 0.9;
     }
 
@@ -532,25 +534,25 @@ public class BotParticipantService {
         // Getters and setters
         public String getCallSid() { return callSid; }
         public void setCallSid(String callSid) { this.callSid = callSid; }
-        
+
         public String getPhoneNumber() { return phoneNumber; }
         public void setPhoneNumber(String phoneNumber) { this.phoneNumber = phoneNumber; }
-        
+
         public String getConferenceName() { return conferenceName; }
         public void setConferenceName(String conferenceName) { this.conferenceName = conferenceName; }
-        
+
         public String getSourceLanguage() { return sourceLanguage; }
         public void setSourceLanguage(String sourceLanguage) { this.sourceLanguage = sourceLanguage; }
-        
+
         public String getTargetLanguage() { return targetLanguage; }
         public void setTargetLanguage(String targetLanguage) { this.targetLanguage = targetLanguage; }
-        
+
         public boolean isBot() { return isBot; }
         public void setIsBot(boolean isBot) { this.isBot = isBot; }
-        
+
         public long getTimestamp() { return timestamp; }
         public void setTimestamp(long timestamp) { this.timestamp = timestamp; }
-        
+
         public String getCallId() { return callId; }
         public void setCallId(String callId) { this.callId = callId; }
     }
@@ -567,22 +569,22 @@ public class BotParticipantService {
         // Getters and setters
         public int getActiveBots() { return activeBots; }
         public void setActiveBots(int activeBots) { this.activeBots = activeBots; }
-        
+
         public int getActiveConferences() { return activeConferences; }
         public void setActiveConferences(int activeConferences) { this.activeConferences = activeConferences; }
-        
+
         public int getMaxConcurrentBots() { return maxConcurrentBots; }
         public void setMaxConcurrentBots(int maxConcurrentBots) { this.maxConcurrentBots = maxConcurrentBots; }
-        
+
         public int getAvailableRateLimit() { return availableRateLimit; }
         public void setAvailableRateLimit(int availableRateLimit) { this.availableRateLimit = availableRateLimit; }
-        
+
         public int getTotalBotsCreated() { return totalBotsCreated; }
         public void setTotalBotsCreated(int totalBotsCreated) { this.totalBotsCreated = totalBotsCreated; }
-        
+
         public int getTotalConferencesCreated() { return totalConferencesCreated; }
         public void setTotalConferencesCreated(int totalConferencesCreated) { this.totalConferencesCreated = totalConferencesCreated; }
-        
+
         public long getUptimeMinutes() { return uptimeMinutes; }
         public void setUptimeMinutes(long uptimeMinutes) { this.uptimeMinutes = uptimeMinutes; }
     }

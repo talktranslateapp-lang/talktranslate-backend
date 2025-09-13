@@ -7,6 +7,9 @@ import com.twilio.twiml.voice.Say;
 import com.twilio.twiml.voice.Dial;
 import com.twilio.twiml.voice.Conference;
 import com.twilio.twiml.voice.Hangup;
+import com.twilio.twiml.voice.Start;
+import com.twilio.twiml.voice.Stream;
+import com.twilio.twiml.voice.Parameter;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Autowired;
@@ -48,21 +51,21 @@ public class CallController {
     @GetMapping("/token")
     public ResponseEntity<Map<String, Object>> getToken(@RequestParam String identity) {
         Map<String, Object> response = new HashMap<>();
-        
+
         try {
             String token = botParticipantService.generateAccessToken(identity);
-            
+
             response.put("success", true);
             response.put("token", token);
             response.put("identity", identity);
-            
+
         } catch (Exception e) {
             logger.error("Failed to generate token: {}", e.getMessage(), e);
             response.put("success", false);
             response.put("error", "Failed to generate access token: " + e.getMessage());
             return ResponseEntity.internalServerError().body(response);
         }
-        
+
         return ResponseEntity.ok(response);
     }
 
@@ -72,27 +75,27 @@ public class CallController {
     @PostMapping("/store-call-data")
     public ResponseEntity<Map<String, Object>> storeCallData(@RequestBody Map<String, Object> callData) {
         Map<String, Object> response = new HashMap<>();
-        
+
         try {
             String callId = (String) callData.get("callId");
             String targetPhoneNumber = (String) callData.get("targetPhoneNumber");
             String sourceLanguage = (String) callData.get("sourceLanguage");
             String targetLanguage = (String) callData.get("targetLanguage");
-            
+
             // Store the call data for webhook processing
             botParticipantService.storeCallData(callId, targetPhoneNumber, sourceLanguage, targetLanguage);
-            
+
             response.put("success", true);
             response.put("message", "Call data stored successfully");
             response.put("callId", callId);
-            
+
         } catch (Exception e) {
             logger.error("Failed to store call data: {}", e.getMessage(), e);
             response.put("success", false);
             response.put("error", "Failed to store call data: " + e.getMessage());
             return ResponseEntity.internalServerError().body(response);
         }
-        
+
         return ResponseEntity.ok(response);
     }
 
@@ -103,7 +106,7 @@ public class CallController {
     public ResponseEntity<String> conferenceJoin(@RequestParam String conferenceName) {
         try {
             logger.info("Conference join request for: {}", conferenceName);
-            
+
             // Simple TwiML - just join the conference, no additional logic
             VoiceResponse response = new VoiceResponse.Builder()
                 .dial(new Dial.Builder()
@@ -113,21 +116,87 @@ public class CallController {
                         .build())
                     .build())
                 .build();
-            
+
             return ResponseEntity.ok()
                 .contentType(MediaType.APPLICATION_XML)
                 .body(response.toXml());
-                
+
         } catch (Exception e) {
             logger.error("Error in conference join: {}", e.getMessage(), e);
-            
+
             VoiceResponse errorResponse = new VoiceResponse.Builder()
                 .say(new Say.Builder("Unable to join conference.")
                     .voice(Say.Voice.ALICE)
                     .build())
                 .hangup(new Hangup.Builder().build())
                 .build();
-                
+
+            return ResponseEntity.ok()
+                .contentType(MediaType.APPLICATION_XML)
+                .body(errorResponse.toXml());
+        }
+    }
+
+    /**
+     * Translation bot endpoint - Uses Media Streams for real translation
+     */
+    @PostMapping(value = "/translation-bot", produces = MediaType.APPLICATION_XML_VALUE)
+    public ResponseEntity<String> translationBot(
+            @RequestParam String conferenceName,
+            @RequestParam String fromLang,
+            @RequestParam String toLang,
+            HttpServletRequest request) {
+        
+        try {
+            logger.info("Translation bot joining conference: {} ({}→{})", conferenceName, fromLang, toLang);
+            
+            // Get the host for WebSocket URL
+            String host = request.getHeader("Host");
+            if (host == null) {
+                host = request.getServerName();
+                if (request.getServerPort() != 80 && request.getServerPort() != 443) {
+                    host += ":" + request.getServerPort();
+                }
+            }
+            
+            String wsUrl = "wss://" + host + "/translation-stream";
+            
+            VoiceResponse response = new VoiceResponse.Builder()
+                .say(new Say.Builder("Translation bot is joining the conference")
+                    .voice(Say.Voice.ALICE)
+                    .build())
+                .start(new Start.Builder()
+                    .stream(new Stream.Builder()
+                        .url(wsUrl)
+                        .parameter(new Parameter.Builder().name("conferenceName").value(conferenceName).build())
+                        .parameter(new Parameter.Builder().name("fromLang").value(fromLang).build())
+                        .parameter(new Parameter.Builder().name("toLang").value(toLang).build())
+                        .build())
+                    .build())
+                .dial(new Dial.Builder()
+                    .conference(new Conference.Builder(conferenceName)
+                        .startConferenceOnEnter(true)
+                        .endConferenceOnExit(false)
+                        .build())
+                    .build())
+                .build();
+
+            logger.info("Translation bot TwiML generated for WebSocket: {}", wsUrl);
+            
+            return ResponseEntity.ok()
+                .contentType(MediaType.APPLICATION_XML)
+                .body(response.toXml());
+
+        } catch (Exception e) {
+            logger.error("Error creating translation bot TwiML: {}", e.getMessage(), e);
+            
+            VoiceResponse errorResponse = new VoiceResponse.Builder()
+                .say(new Say.Builder("Translation bot failed to join conference")
+                    .voice(Say.Voice.ALICE)
+                    .build())
+                .hangup(new Hangup.Builder().build())
+                .build();
+
             return ResponseEntity.ok()
                 .contentType(MediaType.APPLICATION_XML)
                 .body(errorResponse.toXml());
@@ -145,25 +214,25 @@ public class CallController {
             @RequestParam(required = false) String To,
             @RequestParam(required = false) String conferenceName,
             HttpServletRequest request) {
-        
+
         try {
             logger.info("Incoming call: CallSid={}, From={}, To={}, ConferenceName={}", CallSid, From, To, conferenceName);
-            
+
             String finalConferenceName = null;
             String sourceLanguage = "en-US";
             String targetLanguage = "es-ES";
             String targetPhoneNumber = null;
-            
+
             // **PRIORITY 1: Use conferenceName parameter if provided**
             if (conferenceName != null && !conferenceName.trim().isEmpty()) {
                 finalConferenceName = conferenceName;
                 logger.info("Using conference name from URL parameter: {}", finalConferenceName);
-                
+
                 // Look up languages from stored call data
-                for (Map.Entry<String, BotParticipantService.ParticipantMetadata> entry : 
+                for (Map.Entry<String, BotParticipantService.ParticipantMetadata> entry :
                      botParticipantService.getStoredCallData().entrySet()) {
                     BotParticipantService.ParticipantMetadata metadata = entry.getValue();
-                    if (metadata.getConferenceName() != null && 
+                    if (metadata.getConferenceName() != null &&
                         metadata.getConferenceName().equals(finalConferenceName)) {
                         sourceLanguage = metadata.getSourceLanguage() != null ? metadata.getSourceLanguage() : "en-US";
                         targetLanguage = metadata.getTargetLanguage() != null ? metadata.getTargetLanguage() : "es-ES";
@@ -174,12 +243,12 @@ public class CallController {
                 }
             } else {
                 // **FALLBACK: Look up stored call data to determine conference**
-                for (Map.Entry<String, BotParticipantService.ParticipantMetadata> entry : 
+                for (Map.Entry<String, BotParticipantService.ParticipantMetadata> entry :
                      botParticipantService.getStoredCallData().entrySet()) {
                     BotParticipantService.ParticipantMetadata metadata = entry.getValue();
-                    
+
                     // Match by conference name from the call ID
-                    if (metadata.getConferenceName() != null && 
+                    if (metadata.getConferenceName() != null &&
                         entry.getKey().startsWith("translation-call-")) {
                         finalConferenceName = metadata.getConferenceName();
                         sourceLanguage = metadata.getSourceLanguage() != null ? metadata.getSourceLanguage() : "en-US";
@@ -188,16 +257,16 @@ public class CallController {
                         break;
                     }
                 }
-                
+
                 // Default conference name if none found
                 if (finalConferenceName == null) {
                     finalConferenceName = "translation-call-" + System.currentTimeMillis();
                 }
             }
-            
-            logger.info("Final conference setup: name={}, target={}, languages={}→{}", 
+
+            logger.info("Final conference setup: name={}, target={}, languages={}→{}",
                        finalConferenceName, targetPhoneNumber, sourceLanguage, targetLanguage);
-            
+
             // **ADD TRANSLATION BOT** - Only once per conference
             if (!botParticipantService.isBotInConference(finalConferenceName)) {
                 try {
@@ -211,7 +280,7 @@ public class CallController {
             } else {
                 logger.info("Bot already exists in conference: {}", finalConferenceName);
             }
-            
+
             // **AUTOMATIC PARTICIPANT ADDITION** - Only for initial frontend calls that have conferenceName parameter
             if (conferenceName != null && targetPhoneNumber != null && !targetPhoneNumber.trim().isEmpty()) {
                 try {
@@ -224,10 +293,10 @@ public class CallController {
                     // Continue with conference creation even if participant addition fails
                 }
             } else {
-                logger.info("Skipping participant addition - conferenceName: {}, targetPhoneNumber: {}", 
+                logger.info("Skipping participant addition - conferenceName: {}, targetPhoneNumber: {}",
                            conferenceName, targetPhoneNumber);
             }
-            
+
             // Generate TwiML to connect caller to conference
             VoiceResponse voiceResponse = new VoiceResponse.Builder()
                 .say(new Say.Builder("Welcome to Talk Translate. Connecting you to the translation conference.")
@@ -240,17 +309,17 @@ public class CallController {
                         .build())
                     .build())
                 .build();
-            
+
             String twimlResponse = voiceResponse.toXml();
             logger.info("Generated TwiML for call {} using conference {}: {}", CallSid, finalConferenceName, twimlResponse);
-            
+
             return ResponseEntity.ok()
                 .contentType(MediaType.APPLICATION_XML)
                 .body(twimlResponse);
-                
+
         } catch (Exception e) {
             logger.error("Error handling incoming call {}: {}", CallSid, e.getMessage(), e);
-            
+
             // Return error TwiML
             VoiceResponse errorResponse = new VoiceResponse.Builder()
                 .say(new Say.Builder("Sorry, there was an error connecting your call. Please try again later.")
@@ -258,7 +327,7 @@ public class CallController {
                     .build())
                 .hangup(new Hangup.Builder().build())
                 .build();
-                
+
             return ResponseEntity.ok()
                 .contentType(MediaType.APPLICATION_XML)
                 .body(errorResponse.toXml());
@@ -271,9 +340,9 @@ public class CallController {
     @PostMapping("/start-translation")
     public ResponseEntity<Map<String, Object>> startTranslationCall(
             @RequestBody Map<String, String> request) {
-        
+
         Map<String, Object> response = new HashMap<>();
-        
+
         try {
             String fromLanguage = request.get("fromLanguage");
             String toLanguage = request.get("toLanguage");
@@ -288,12 +357,12 @@ public class CallController {
 
             // Generate secure internal conference ID
             String internalConferenceId = "translation-" + System.currentTimeMillis();
-            
+
             // Generate secure, non-PII conference name
             String secureConferenceSid = secureConferenceService.generateSecureConferenceName(
                 internalConferenceId, fromLanguage, toLanguage);
 
-            logger.info("Starting translation call: {} -> {}, Phone: {}, Conference: {}", 
+            logger.info("Starting translation call: {} -> {}, Phone: {}, Conference: {}",
                        fromLanguage, toLanguage, phoneNumber, secureConferenceSid);
 
             // Add translation bot to conference
@@ -317,7 +386,7 @@ public class CallController {
             response.put("fromLanguage", fromLanguage);
             response.put("toLanguage", toLanguage);
 
-            logger.info("Translation call started successfully: conference={}, bot={}", 
+            logger.info("Translation call started successfully: conference={}, bot={}",
                        secureConferenceSid, botCallSid);
 
         } catch (Exception e) {
@@ -336,7 +405,7 @@ public class CallController {
     @PostMapping("/add-bot")
     public ResponseEntity<Map<String, Object>> addBot(@RequestBody Map<String, String> request) {
         Map<String, Object> response = new HashMap<>();
-        
+
         try {
             String conferenceSid = request.get("conferenceSid");
             String targetLanguage = request.get("targetLanguage");
@@ -376,7 +445,7 @@ public class CallController {
     @PostMapping("/add-participant")
     public ResponseEntity<Map<String, Object>> addParticipant(@RequestBody Map<String, String> request) {
         Map<String, Object> response = new HashMap<>();
-        
+
         try {
             String conferenceSid = request.get("conferenceSid");
             String phoneNumber = request.get("phoneNumber");
@@ -417,7 +486,7 @@ public class CallController {
     @GetMapping("/conference/{conferenceSid}/status")
     public ResponseEntity<Map<String, Object>> getConferenceStatus(@PathVariable String conferenceSid) {
         Map<String, Object> response = new HashMap<>();
-        
+
         try {
             // Validate conference name format
             if (!secureConferenceService.isValidConferenceName(conferenceSid)) {
@@ -433,13 +502,13 @@ public class CallController {
             response.put("success", true);
             response.put("conferenceSid", conferenceSid);
             response.put("participantCount", participants.size());
-            
+
             if (conferenceInfo != null) {
                 response.put("status", conferenceInfo.getStatus());
             } else {
                 response.put("status", "not_found");
             }
-            
+
             if (metadata != null) {
                 response.put("sourceLanguage", metadata.getSourceLanguage());
                 response.put("targetLanguage", metadata.getTargetLanguage());
@@ -462,7 +531,7 @@ public class CallController {
     @PostMapping("/conference/{conferenceSid}/end")
     public ResponseEntity<Map<String, Object>> endConference(@PathVariable String conferenceSid) {
         Map<String, Object> response = new HashMap<>();
-        
+
         try {
             // Validate conference name format
             if (!secureConferenceService.isValidConferenceName(conferenceSid)) {
@@ -472,7 +541,7 @@ public class CallController {
             }
 
             botParticipantService.endConference(conferenceSid);
-            
+
             // Also remove from secure conference tracking
             secureConferenceService.removeConference(conferenceSid);
 
@@ -495,7 +564,7 @@ public class CallController {
     @PostMapping("/cleanup")
     public ResponseEntity<Map<String, Object>> cleanupExpiredConferences() {
         Map<String, Object> response = new HashMap<>();
-        
+
         try {
             secureConferenceService.cleanupExpiredConferences();
             response.put("success", true);
@@ -516,11 +585,11 @@ public class CallController {
     @GetMapping("/stats")
     public ResponseEntity<Map<String, Object>> getServiceStats() {
         Map<String, Object> response = new HashMap<>();
-        
+
         try {
             var botStats = botParticipantService.getStats();
             var conferenceStats = secureConferenceService.getConferenceStats();
-            
+
             response.put("success", true);
             response.put("botStats", Map.of(
                 "activeBots", botStats.getActiveBots(),
