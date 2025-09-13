@@ -169,6 +169,9 @@ public class BotParticipantService {
                                "&fromLang=" + java.net.URLEncoder.encode(fromLanguage, "UTF-8") + 
                                "&toLang=" + java.net.URLEncoder.encode(toLanguage, "UTF-8");
 
+            // DEBUG: Log the webhook URL to verify what's being used
+            logger.info("Creating bot call with webhook URL: {}", webhookUrl);
+
             Call call = Call.creator(
                 new PhoneNumber(twilioPhoneNumber), // To (bot's virtual number)
                 new PhoneNumber(twilioPhoneNumber), // From (same number for bot calls)
@@ -229,6 +232,9 @@ public class BotParticipantService {
             // CRITICAL FIX: Use /conference-join endpoint to prevent infinite loop
             String webhookUrl = webhookBaseUrl + "/api/call/conference-join?conferenceName=" +
                                java.net.URLEncoder.encode(conferenceSid, "UTF-8");
+
+            // DEBUG: Log participant webhook URL too
+            logger.info("Creating participant call with webhook URL: {}", webhookUrl);
 
             Call call = Call.creator(
                 new PhoneNumber(phoneNumber),
