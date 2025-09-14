@@ -204,6 +204,46 @@ public class CallController {
     }
 
     /**
+     * Handle Twilio call status webhooks - fixes 404 errors
+     */
+    @PostMapping("/webhook/call-status")
+    public ResponseEntity<String> callStatusWebhook(@RequestParam Map<String, String> params) {
+        try {
+            String callSid = params.get("CallSid");
+            String callStatus = params.get("CallStatus");
+            String from = params.get("From");
+            String to = params.get("To");
+            
+            logger.info("Call status webhook: CallSid={}, Status={}, From={}, To={}", 
+                       callSid, callStatus, from, to);
+            
+            // Handle specific call statuses if needed
+            switch (callStatus != null ? callStatus.toLowerCase() : "unknown") {
+                case "completed":
+                    logger.info("Call {} completed successfully", callSid);
+                    break;
+                case "failed":
+                    logger.warn("Call {} failed", callSid);
+                    break;
+                case "busy":
+                    logger.info("Call {} was busy", callSid);
+                    break;
+                case "no-answer":
+                    logger.info("Call {} had no answer", callSid);
+                    break;
+                default:
+                    logger.debug("Call {} status: {}", callSid, callStatus);
+            }
+            
+            return ResponseEntity.ok("OK");
+            
+        } catch (Exception e) {
+            logger.error("Error processing call status webhook: {}", e.getMessage(), e);
+            return ResponseEntity.ok("ERROR");
+        }
+    }
+
+    /**
      * Handle incoming voice calls and generate TwiML
      * ONLY for initial calls - participants use /conference-join to prevent loops
      */
